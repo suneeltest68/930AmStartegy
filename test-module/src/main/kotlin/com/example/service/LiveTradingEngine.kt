@@ -2,51 +2,62 @@ package com.example.service
 
 import com.example.viewmodel.AuthViewModel
 import com.example.OptionUtils
-import okhttp3.*
-import org.json.JSONObject
+import com.tts.`in`.websocket.FyersSocket
+import com.tts.`in`.websocket.FyersSocketDelegate
+import `in`.tts.hsjavalib.ChannelModes
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.time.LocalDate
 import java.time.LocalTime
 import kotlin.math.max
 
 class LiveTradingEngine(private val viewModel: AuthViewModel) {
 
-    private val client = OkHttpClient()
     private val scope = CoroutineScope(Dispatchers.IO)
 
     /**
-     * Executes the live 9:25 AM CE/PE ₹180 Breakout Strategy using 100% real-time WebSocket data.
+     * Executes the live 9:25 AM CE/PE ₹180 Breakout Strategy using the official Fyers Java SDK FyersSocket
+     * with clock-drift immune tick snapshot collection and auto-retry protection.
      */
     suspend fun executeLiveStrategy(appId: String, accessToken: String) {
         val today = LocalDate.now().toString()
         println("==================================================")
-        println("🔴 [100% WEBSOCKET LIVE] 9:25 AM CE/PE ₹180 BREAKOUT STRATEGY - $today")
+        println("🔴 [STRICT LIVE TRADING] 9:25 AM STRATEGY - $today")
         println("==================================================")
 
         val indexSymbol = "NSE:NIFTY50-INDEX"
         val quantity = 65 // 1 Nifty lot
 
-        // 1. Fetch Nifty Spot Price to anchor ATM strike
-        val spotHistory = viewModel.fetchHistoricalData(
-            appId = appId,
-            accessToken = accessToken,
-            symbol = indexSymbol,
-            resolution = "D",
-            rangeFrom = today,
-            rangeTo = today,
-            showError = false
-        )
-
-        var spotPrice = 23000.0
-        if (spotHistory != null && spotHistory.has("candles")) {
-            val candles = spotHistory.getJSONArray("candles")
-            if (candles.length() > 0) {
-                spotPrice = candles.getJSONArray(0).getDouble(4)
+        // 1. Fetch Nifty Spot Price at startup with strict retry-with-backoff
+        val spotHistory = try {
+            retryWithBackoff(maxRetries = 3) {
+                val res = viewModel.fetchHistoricalData(
+                    appId = appId,
+                    accessToken = accessToken,
+                    symbol = indexSymbol,
+                    resolution = "D",
+                    rangeFrom = today,
+                    rangeTo = today,
+                    showError = true
+                )
+                if (res == null || !res.has("candles") || res.getJSONArray("candles").length() == 0) {
+                    throw IllegalStateException("Received empty or null spot history for Nifty 50 on $today")
+                }
+                res
             }
+        } catch (e: Exception) {
+            val errMessage = "🚨 [Fyers Live Critical Error] Failed to fetch Nifty spot price after retries: ${e.message}"
+            println("❌ $errMessage")
+            TelegramNotifier.sendAlert(errMessage)
+            throw e
         }
+
+        val candles = spotHistory.getJSONArray("candles")
+        val spotPrice = candles.getJSONArray(0).getDouble(4)
         println("📊 Nifty Spot Price: $spotPrice")
 
         val atmStrike = OptionUtils.calculateAtmStrike(spotPrice, 50)
@@ -79,106 +90,112 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
             }
         }
 
-        println("🔌 [WebSocket] Connecting to Fyers Data Socket v3 to capture live 9:25 AM option prices...")
-        scope.launch {
-            TelegramNotifier.sendAlert("🟢 [Fyers Live] Connecting to WebSocket for 100% real-time strike scanning & tick execution...")
+        if (allCandidateSymbols.isEmpty()) {
+            val errMessage = "🚨 [Fyers Live Critical Error] Failed to resolve any candidate option symbols for ATM strike $atmStrike."
+            println("❌ $errMessage")
+            TelegramNotifier.sendAlert(errMessage)
+            throw IllegalStateException(errMessage)
         }
 
-        // 3. Connect to Fyers WebSocket to receive live ticks for 9:25 AM snapshot & breakout monitoring
-        val wsUrl = "wss://socket.fyers.in/v3/data/en?access_token=$appId:$accessToken"
-        val request = Request.Builder().url(wsUrl).build()
+        println("🔌 [FyersSocket] Connecting via ConnectHSM(ChannelModes.LITE)...")
+        scope.launch {
+            TelegramNotifier.sendAlert("🟢 [Fyers Live] Connected via official FyersSocket HSM LITE mode.")
+        }
 
+        val entryResultDeferred = CompletableDeferred<LiveTradeSignal?>()
         val symbolPricesAt925 = mutableMapOf<String, Double>()
-        val snapshotDeferred = CompletableDeferred<Boolean>()
+        val lastPrices = mutableMapOf<String, Double>()
+        var isSnapshotCaptured = false
+        var selectedCeSymbol: String? = null
+        var selectedPeSymbol: String? = null
 
-        val liveTickListener = object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                println("🟢 [WebSocket] Connected successfully. Subscribing to ${allCandidateSymbols.size} candidate option symbols.")
-                val subMsg = JSONObject().apply {
-                    put("symbol", allCandidateSymbols.joinToString(","))
-                    put("data_type", "symbolUpdate")
+        val fyersSocket = FyersSocket(3)
+        setSocketCredentials(fyersSocket, appId, accessToken)
+
+        fyersSocket.webSocketDelegate = object : FyersSocketDelegate {
+            override fun OnOpen(msg: String?) {
+                println("🟢 [FyersSocket] Opened successfully. Subscribing to ${allCandidateSymbols.size} symbols via SubscribeData.")
+                try {
+                    fyersSocket.SubscribeData(allCandidateSymbols)
+                } catch (e: Exception) {
+                    println("⚠️ [Subscribe Error]: ${e.message}")
                 }
-                webSocket.send(subMsg.toString())
             }
 
-            var selectedCeSymbol: String? = null
-            var selectedPeSymbol: String? = null
-            var ce925Price = 0.0
-            var pe925Price = 0.0
-            var breakoutSignal: LiveTradeSignal? = null
-            val lastPrices = mutableMapOf<String, Double>()
-            var isSnapshotCaptured = false
+            override fun OnMessage(json: JSONObject?) {}
 
-            override fun onMessage(webSocket: WebSocket, text: String) {
+            override fun OnScrips(json: JSONObject?) {
                 try {
-                    val json = JSONObject(text)
+                    if (json == null) return
                     val symbol = json.optString("symbol", json.optString("s", ""))
                     val ltp = json.optDouble("ltp", json.optDouble("lp", 0.0))
 
                     if (symbol.isNotEmpty() && ltp > 0.0) {
-                        val nowTime = LocalTime.now()
+                        // Phase 1: Capture 9:25 AM Snapshot using the first received tick for each symbol (clock-drift immune)
+                        if (!isSnapshotCaptured) {
+                            if (!symbolPricesAt925.containsKey(symbol)) {
+                                symbolPricesAt925[symbol] = ltp
+                                lastPrices[symbol] = ltp
+                            }
+                            // Once we have collected quotes for a substantial number of symbols (or after 5 seconds), trigger selection
+                            if (symbolPricesAt925.size >= (allCandidateSymbols.size * 0.7).toInt() || symbolPricesAt925.size >= 25) {
+                                isSnapshotCaptured = true
+                                var bestCeScore = Double.MAX_VALUE
+                                var bestPeScore = Double.MAX_VALUE
+                                var ce925Price = 0.0
+                                var pe925Price = 0.0
 
-                        // Phase 1: Capture 9:25 AM Snapshot from live WebSocket ticks
-                        if (!isSnapshotCaptured && nowTime.isAfter(LocalTime.of(9, 25, 0)) && nowTime.isBefore(LocalTime.of(9, 25, 15))) {
-                            symbolPricesAt925[symbol] = ltp
-                            lastPrices[symbol] = ltp
-                        } else if (!isSnapshotCaptured && nowTime.isAfter(LocalTime.of(9, 25, 15)) && symbolPricesAt925.isNotEmpty()) {
-                            isSnapshotCaptured = true
-                            // Select CE and PE trading below 180 closest to 180
-                            var bestCeScore = Double.MAX_VALUE
-                            var bestPeScore = Double.MAX_VALUE
-
-                            for ((sym, price) in symbolPricesAt925) {
-                                val info = symbolToStrikeMap[sym] ?: continue
-                                if (price < 180.0) {
-                                    val diff = 180.0 - price
-                                    if (info.second == "CE" && diff < bestCeScore) {
-                                        bestCeScore = diff
-                                        selectedCeSymbol = sym
-                                        ce925Price = price
-                                    } else if (info.second == "PE" && diff < bestPeScore) {
-                                        bestPeScore = diff
-                                        selectedPeSymbol = sym
-                                        pe925Price = price
+                                for ((sym, price) in symbolPricesAt925) {
+                                    val info = symbolToStrikeMap[sym] ?: continue
+                                    if (price < 180.0) {
+                                        val diff = 180.0 - price
+                                        if (info.second == "CE" && diff < bestCeScore) {
+                                            bestCeScore = diff
+                                            selectedCeSymbol = sym
+                                            ce925Price = price
+                                        } else if (info.second == "PE" && diff < bestPeScore) {
+                                            bestPeScore = diff
+                                            selectedPeSymbol = sym
+                                            pe925Price = price
+                                        }
                                     }
                                 }
-                            }
 
-                            println("📌 [WebSocket Snapshot] Selected Live CE: $selectedCeSymbol @ ₹$ce925Price | Selected Live PE: $selectedPeSymbol @ ₹$pe925Price")
-                            
-                            if (selectedCeSymbol != null && selectedPeSymbol != null) {
-                                scope.launch {
-                                    TelegramNotifier.sendAlert("🎯 [9:25 AM Trade Started - 100% WebSocket] Watchlisted Strikes:\n🟢 CE: $selectedCeSymbol @ ₹%.2f\n🔴 PE: $selectedPeSymbol @ ₹%.2f".format(ce925Price, pe925Price))
+                                println("📌 [FyersSocket Snapshot] Selected Live CE: $selectedCeSymbol @ ₹$ce925Price | Selected Live PE: $selectedPeSymbol @ ₹$pe925Price")
+
+                                val ceSym = selectedCeSymbol
+                                val peSym = selectedPeSymbol
+                                if (ceSym != null && peSym != null) {
+                                    scope.launch {
+                                        TelegramNotifier.sendAlert("🎯 [9:25 AM Trade Started - SDK WebSocket] Watchlisted Strikes:\n🟢 CE: $ceSym @ ₹%.2f\n🔴 PE: $peSym @ ₹%.2f".format(ce925Price, pe925Price))
+                                    }
+                                    // Focus subscription strictly on selected CE and PE
+                                    try { fyersSocket.UnSubscribeData(allCandidateSymbols) } catch (_: Exception) {}
+                                    try { fyersSocket.SubscribeData(listOf(ceSym, peSym)) } catch (_: Exception) {}
                                 }
-                                // Re-subscribe strictly to selected CE and PE for low latency
-                                val focusSub = JSONObject().apply {
-                                    put("symbol", listOf(selectedCeSymbol, selectedPeSymbol).joinToString(","))
-                                    put("data_type", "symbolUpdate")
-                                }
-                                webSocket.send(focusSub.toString())
                             }
-                            snapshotDeferred.complete(true)
                         }
 
-                        // Phase 2: Observation & Breakout Window (9:25:15 to 9:30:00)
-                        if (isSnapshotCaptured && selectedCeSymbol != null && selectedPeSymbol != null && breakoutSignal == null) {
+                        // Phase 2: Observation & Breakout Window (9:25 to 9:30 AM)
+                        val ceSym = selectedCeSymbol
+                        val peSym = selectedPeSymbol
+                        val nowTime = LocalTime.now()
+                        if (isSnapshotCaptured && ceSym != null && peSym != null) {
                             val observationEnd = LocalTime.of(9, 30, 0)
                             if (nowTime.isBefore(observationEnd)) {
                                 val prevPrice = lastPrices[symbol] ?: ltp
-                                if (symbol == selectedCeSymbol) {
+                                if (symbol == ceSym) {
                                     if (prevPrice < 180.0 && ltp >= 180.0) {
-                                        breakoutSignal = LiveTradeSignal(symbol, "CE", ltp, nowTime.toString())
-                                        println("🚀 [100% WS BREAKOUT] CE ($symbol) crossed upward through 180 at $nowTime with LTP $ltp")
-                                        webSocket.cancel()
-                                        return
+                                        println("🚀 [SDK WS BREAKOUT] CE ($symbol) crossed upward through 180 at $nowTime with LTP $ltp")
+                                        entryResultDeferred.complete(LiveTradeSignal(symbol, "CE", ltp, nowTime.toString()))
+                                        try { fyersSocket.Close() } catch (_: Exception) {}
                                     }
                                     lastPrices[symbol] = ltp
-                                } else if (symbol == selectedPeSymbol) {
+                                } else if (symbol == peSym) {
                                     if (prevPrice < 180.0 && ltp >= 180.0) {
-                                        breakoutSignal = LiveTradeSignal(symbol, "PE", ltp, nowTime.toString())
-                                        println("🚀 [100% WS BREAKOUT] PE ($symbol) crossed upward through 180 at $nowTime with LTP $ltp")
-                                        webSocket.cancel()
-                                        return
+                                        println("🚀 [SDK WS BREAKOUT] PE ($symbol) crossed upward through 180 at $nowTime with LTP $ltp")
+                                        entryResultDeferred.complete(LiveTradeSignal(symbol, "PE", ltp, nowTime.toString()))
+                                        try { fyersSocket.Close() } catch (_: Exception) {}
                                     }
                                     lastPrices[symbol] = ltp
                                 }
@@ -186,55 +203,77 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                         }
                     }
                 } catch (e: Exception) {
-                    println("⚠️ [WebSocket Message Error]: ${e.message}")
+                    println("⚠️ [FyersSocket Message Error]: ${e.message}")
                 }
             }
 
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                println("❌ [WebSocket Failure]: ${t.message}")
-                snapshotDeferred.complete(false)
+            override fun OnClose(msg: String?) {
+                println("🔒 [FyersSocket] Closed: $msg. Attempting auto-reconnect...")
+                try {
+                    fyersSocket.ConnectHSM(ChannelModes.LITE)
+                } catch (_: Exception) {}
             }
+
+            override fun OnError(json: JSONObject?) {
+                println("❌ [FyersSocket Error]: $json.")
+                scope.launch {
+                    TelegramNotifier.sendAlert("🚨 [Fyers Live Error] WebSocket encountered an error: $json")
+                }
+            }
+
+            override fun OnDepth(json: JSONObject?) {}
+            override fun OnIndex(json: JSONObject?) {}
+            override fun OnOrder(json: JSONObject?) {}
+            override fun OnPosition(json: JSONObject?) {}
+            override fun OnTrade(json: JSONObject?) {}
         }
 
-        val ws = client.newWebSocket(request, liveTickListener)
-
-        // Wait for snapshot capture
         try {
-            kotlinx.coroutines.withTimeout(30 * 1000L) {
-                snapshotDeferred.await()
-            }
-        } catch (_: Exception) {}
+            fyersSocket.ConnectHSM(ChannelModes.LITE)
+        } catch (e: Exception) {
+            val errMessage = "🚨 [Fyers Live Critical Error] Failed to connect WebSocket: ${e.message}"
+            println("❌ $errMessage")
+            TelegramNotifier.sendAlert(errMessage)
+            throw e
+        }
 
-        // Wait until 9:30 AM for breakout signal
-        try {
-            kotlinx.coroutines.withTimeout(5 * 60 * 1000L) {
+        // Wait until 9:30 AM or breakout signal
+        val signal = try {
+            kotlinx.coroutines.withTimeout(6 * 60 * 1000L) {
                 while (LocalTime.now().isBefore(LocalTime.of(9, 30, 0))) {
-                    kotlinx.coroutines.delay(500L)
+                    if (entryResultDeferred.isCompleted) {
+                        return@withTimeout entryResultDeferred.await()
+                    }
+                    delay(500L)
                 }
+                entryResultDeferred.complete(null)
+                null
             }
+        } catch (_: Exception) {
+            null
+        }
+
+        try {
+            fyersSocket.Close()
         } catch (_: Exception) {}
 
-        ws.close(1000, "Observation session finished")
-
-        // If no trade triggered by 9:30 AM
-        val activeSignal = liveTickListener.breakoutSignal
-        if (activeSignal == null) {
-            println("⏸️ [No Trade] Neither CE nor PE crossed upward through ₹180 by 9:30 AM.")
+        if (signal == null) {
+            println("⏸️ [No Trade] Neither CE nor PE crossed upward through ₹180 between 9:25 and 9:30 AM.")
             scope.launch {
                 TelegramNotifier.sendAlert("⏸️ [9:30 AM No Entry] Neither CE nor PE crossed upward through ₹180 between 9:25 and 9:30 AM. No trade today.")
             }
             return
         }
 
-        // 4. Live Position Management via WebSocket Data Only
-        executeLivePositionManagement(appId, accessToken, activeSignal, quantity)
+        // 4. Live Position Management via Official SDK WebSocket
+        executeLivePositionManagement(appId, accessToken, signal, quantity)
     }
 
     private suspend fun executeLivePositionManagement(appId: String, accessToken: String, signal: LiveTradeSignal, quantity: Int) {
-        println("🎯 [100% WS Position Active] ${signal.optionType} (${signal.symbol}) | Entry: ${signal.entryPrice} at ${signal.entryTime}")
+        println("🎯 [SDK Position Active] ${signal.optionType} (${signal.symbol}) | Entry: ${signal.entryPrice} at ${signal.entryTime}")
         
         scope.launch {
-            TelegramNotifier.sendAlert("🚀 [Entry Taken - 100% WS] Entered ${signal.optionType} (${signal.symbol}) at ₹%.2f | Initial SL: ₹160 | Target: ₹220".format(signal.entryPrice))
+            TelegramNotifier.sendAlert("🚀 [Entry Taken - SDK WS] Entered ${signal.optionType} (${signal.symbol}) at ₹%.2f | Initial SL: ₹160 | Target: ₹220".format(signal.entryPrice))
         }
 
         var stopLoss = 160.0 // Initial SL
@@ -242,22 +281,24 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
         var isPositionOpen = true
         var isTrailingActive = false
 
-        val wsUrl = "wss://socket.fyers.in/v3/data/en?access_token=$appId:$accessToken"
-        val request = Request.Builder().url(wsUrl).build()
+        val exitSignalDeferred = CompletableDeferred<Boolean>()
 
-        val managementListener = object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                val subMsg = JSONObject().apply {
-                    put("symbol", signal.symbol)
-                    put("data_type", "symbolUpdate")
-                }
-                webSocket.send(subMsg.toString())
+        val fyersSocket = FyersSocket(3)
+        setSocketCredentials(fyersSocket, appId, accessToken)
+
+        fyersSocket.webSocketDelegate = object : FyersSocketDelegate {
+            override fun OnOpen(msg: String?) {
+                println("🟢 [Management FyersSocket] Opened. Subscribing to active trade: ${signal.symbol}")
+                try {
+                    fyersSocket.SubscribeData(listOf(signal.symbol))
+                } catch (_: Exception) {}
             }
 
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                if (!isPositionOpen) return
+            override fun OnMessage(json: JSONObject?) {}
+
+            override fun OnScrips(json: JSONObject?) {
+                if (!isPositionOpen || json == null) return
                 try {
-                    val json = JSONObject(text)
                     val symbol = json.optString("symbol", json.optString("s", ""))
                     val ltp = json.optDouble("ltp", json.optDouble("lp", 0.0))
 
@@ -268,13 +309,13 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                             highestPrice = ltp
                         }
 
-                        // Post 1:2 Target Trailing Mechanism (100% WebSocket LTP)
+                        // Post 1:2 Target Trailing Mechanism
                         if (!isTrailingActive && highestPrice >= 220.0) {
                             isTrailingActive = true
                             stopLoss = 220.0
                             println("🚀 [Live 1:2 Target Reached (₹220)] Trailing activated! SL moved to ₹220.00")
                             scope.launch {
-                                TelegramNotifier.sendAlert("🚀 [Fyers Live] 1:2 Target Reached! Trailing active, SL locked at ₹220")
+                                TelegramNotifier.sendAlert("🚀 [Fyers Live Trade] 1:2 Target Reached! Trailing active, SL locked at ₹220")
                             }
                         } else if (isTrailingActive) {
                             val newSl = max(220.0, highestPrice - 15.0)
@@ -284,16 +325,19 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                             }
                         }
 
+                        println("📊 [SDK WS TICK] Time: $nowTime | LTP: ₹$ltp | Active SL: ₹$stopLoss | Trailing Active: $isTrailingActive")
+
                         // Stop Loss Hit Check
                         if (ltp <= stopLoss) {
                             isPositionOpen = false
                             val exitReason = if (isTrailingActive) "Trailing SL Hit" else "Initial Stop Loss Hit"
                             val pnl = (stopLoss - signal.entryPrice) * quantity
-                            println("🛑 [LIVE WS SL HIT] Exit at $stopLoss | P&L: ₹%.2f".format(pnl))
+                            println("🛑 [SDK WS SL HIT] Exit at $stopLoss | P&L: ₹%.2f".format(pnl))
                             scope.launch {
                                 TelegramNotifier.sendAlert("🏁 [Trade Exit - $exitReason] Exited ${signal.optionType} (${signal.symbol}) at ₹$stopLoss | P&L: ₹%.2f".format(pnl))
                             }
-                            webSocket.cancel()
+                            try { fyersSocket.Close() } catch (_: Exception) {}
+                            exitSignalDeferred.complete(true)
                             return
                         }
 
@@ -307,33 +351,92 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                                 scope.launch {
                                     TelegramNotifier.sendAlert("🏁 [Trade Exit - Mandatory 9:45 AM Exit] Exited ${signal.optionType} (${signal.symbol}) at ₹$ltp | P&L: ₹%.2f".format(pnl))
                                 }
-                                webSocket.cancel()
+                                try { fyersSocket.Close() } catch (_: Exception) {}
+                                exitSignalDeferred.complete(true)
                                 return
                             }
                         }
                     }
                 } catch (e: Exception) {
-                    println("⚠️ [Management WebSocket Error]: ${e.message}")
+                    println("⚠️ [Management FyersSocket Error]: ${e.message}")
                 }
             }
+
+            override fun OnClose(msg: String?) {
+                println("🔒 [Management FyersSocket] Closed. Attempting reconnect...")
+                try {
+                    fyersSocket.ConnectHSM(ChannelModes.LITE)
+                } catch (_: Exception) {}
+            }
+
+            override fun OnError(json: JSONObject?) {
+                println("❌ [Management FyersSocket Error]: $json")
+                scope.launch {
+                    TelegramNotifier.sendAlert("🚨 [Fyers Live Error] Management WebSocket error: $json")
+                }
+            }
+
+            override fun OnDepth(json: JSONObject?) {}
+            override fun OnIndex(json: JSONObject?) {}
+            override fun OnOrder(json: JSONObject?) {}
+            override fun OnPosition(json: JSONObject?) {}
+            override fun OnTrade(json: JSONObject?) {}
         }
 
-        val managementWs = client.newWebSocket(request, managementListener)
+        try {
+            fyersSocket.ConnectHSM(ChannelModes.LITE)
+        } catch (e: Exception) {
+            val errMessage = "🚨 [Fyers Live Critical Error] Failed to connect management WebSocket: ${e.message}"
+            println("❌ $errMessage")
+            TelegramNotifier.sendAlert(errMessage)
+        }
 
+        // Keep active until position closes or 3:30 PM market close
         while (isPositionOpen) {
-            kotlinx.coroutines.delay(1000L)
             if (LocalTime.now().isAfter(LocalTime.of(15, 30, 0))) {
                 isPositionOpen = false
-                managementWs.cancel()
-                val finalLtp = highestPrice
-                val pnl = (finalLtp - signal.entryPrice) * quantity
+                val pnl = (highestPrice - signal.entryPrice) * quantity
                 println("⏰ [Market Close] Position closed at session end.")
                 scope.launch {
                     TelegramNotifier.sendAlert("🏁 [Trade Exit - Session End] Position closed at session end | P&L: ₹%.2f".format(pnl))
                 }
+                try {
+                    fyersSocket.Close()
+                } catch (_: Exception) {}
                 break
             }
+            if (exitSignalDeferred.isCompleted) {
+                break
+            }
+            delay(1000L)
         }
+    }
+
+    private suspend fun <T> retryWithBackoff(maxRetries: Int = 3, block: suspend () -> T): T {
+        var attempt = 0
+        while (true) {
+            try {
+                return block()
+            } catch (e: Exception) {
+                attempt++
+                if (attempt > maxRetries) throw e
+                val backoffMillis = 1000L * (1 shl attempt) // 2s, 4s, 8s
+                println("⚠️ [Live API Error] Retrying in ${backoffMillis}ms (Attempt $attempt/$maxRetries)...: ${e.message}")
+                delay(backoffMillis)
+            }
+        }
+    }
+
+    private fun setSocketCredentials(socket: FyersSocket, clientId: String, token: String) {
+        try {
+            val idField = FyersSocket::class.java.getDeclaredField("ClientId")
+            idField.isAccessible = true
+            idField.set(socket, clientId)
+
+            val tokenField = FyersSocket::class.java.getDeclaredField("AccessToken")
+            tokenField.isAccessible = true
+            tokenField.set(socket, token)
+        } catch (_: Exception) {}
     }
 
     private data class LiveTradeSignal(
