@@ -32,22 +32,79 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
         val indexSymbol = "NSE:NIFTY50-INDEX"
         val quantity = 65 // 1 Nifty lot
 
-        // 1. Fetch Nifty Spot Price at startup with strict retry-with-backoff
-        val spotHistory = try {
+        // 1. Fetch Nifty Spot Price at startup with strict retry-with-backoff and robust fallbacks (1-min today, daily today, or previous trading day)
+        val spotPrice = try {
             retryWithBackoff(maxRetries = 3) {
-                val res = viewModel.fetchHistoricalData(
+                var fetchedPrice: Double? = null
+
+                // Try 1: Fetch 1-min candles for today (available from 9:15 AM onwards)
+                val res1min = viewModel.fetchHistoricalData(
                     appId = appId,
                     accessToken = accessToken,
                     symbol = indexSymbol,
-                    resolution = "D",
+                    resolution = "1",
                     rangeFrom = today,
                     rangeTo = today,
-                    showError = true
+                    showError = false
                 )
-                if (res == null || !res.has("candles") || res.getJSONArray("candles").length() == 0) {
-                    throw IllegalStateException("Received empty or null spot history for Nifty 50 on $today")
+                if (res1min != null && res1min.has("candles")) {
+                    val candles = res1min.getJSONArray("candles")
+                    if (candles.length() > 0) {
+                        fetchedPrice = candles.getJSONArray(0).getDouble(1) // Open of first 1-min candle
+                        println("📊 [Live] Fetched Spot from Today's 1-min candles: $fetchedPrice")
+                    }
                 }
-                res
+
+                // Try 2: If 1-min not available, try Daily candle for today
+                if (fetchedPrice == null) {
+                    val resDaily = viewModel.fetchHistoricalData(
+                        appId = appId,
+                        accessToken = accessToken,
+                        symbol = indexSymbol,
+                        resolution = "D",
+                        rangeFrom = today,
+                        rangeTo = today,
+                        showError = false
+                    )
+                    if (resDaily != null && resDaily.has("candles")) {
+                        val candles = resDaily.getJSONArray("candles")
+                        if (candles.length() > 0) {
+                            fetchedPrice = candles.getJSONArray(0).getDouble(4) // Close of daily candle
+                            println("📊 [Live] Fetched Spot from Today's Daily candle: $fetchedPrice")
+                        }
+                    }
+                }
+
+                // Try 3: Walk backwards up to 5 days to find last trading day's Daily candle (handles weekends, holidays, pre-market start)
+                if (fetchedPrice == null) {
+                    var checkDate = LocalDate.parse(today).minusDays(1)
+                    repeat(5) {
+                        val dateStr = checkDate.toString()
+                        val resPast = viewModel.fetchHistoricalData(
+                            appId = appId,
+                            accessToken = accessToken,
+                            symbol = indexSymbol,
+                            resolution = "D",
+                            rangeFrom = dateStr,
+                            rangeTo = dateStr,
+                            showError = false
+                        )
+                        if (resPast != null && resPast.has("candles")) {
+                            val candles = resPast.getJSONArray("candles")
+                            if (candles.length() > 0) {
+                                fetchedPrice = candles.getJSONArray(0).getDouble(4) // Previous close
+                                println("📊 [Live] Fetched Spot from Previous Trading Day ($dateStr) Daily candle: $fetchedPrice")
+                                return@repeat
+                            }
+                        }
+                        checkDate = checkDate.minusDays(1)
+                    }
+                }
+
+                if (fetchedPrice == null || fetchedPrice <= 0.0) {
+                    throw IllegalStateException("Received empty or null spot history for Nifty 50 across all fallbacks for $today")
+                }
+                fetchedPrice
             }
         } catch (e: Exception) {
             val errMessage = "🚨 [Fyers Live Critical Error] Failed to fetch Nifty spot price after retries: ${e.message}"
@@ -56,10 +113,7 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
             throw e
         }
 
-        val candles = spotHistory.getJSONArray("candles")
-        val spotPrice = candles.getJSONArray(0).getDouble(4)
         println("📊 Nifty Spot Price: $spotPrice")
-
         val atmStrike = OptionUtils.calculateAtmStrike(spotPrice, 50)
         println("🎯 Calculated ATM Strike: $atmStrike")
 
