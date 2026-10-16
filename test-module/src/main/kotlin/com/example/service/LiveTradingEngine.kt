@@ -13,6 +13,9 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.time.LocalDate
 import java.time.LocalTime
+import java.time.ZonedDateTime
+import java.time.ZoneId
+import java.time.Duration
 import kotlin.math.max
 
 class LiveTradingEngine(private val viewModel: AuthViewModel) {
@@ -24,6 +27,26 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
      * with clock-drift immune tick snapshot collection and auto-retry protection.
      */
     suspend fun executeLiveStrategy(appId: String, accessToken: String) {
+        val istZone = ZoneId.of("Asia/Kolkata")
+        val now = ZonedDateTime.now(istZone)
+        val target925 = now.withHour(9).withMinute(25).withSecond(0).withNano(0)
+        val marketCloseToday = now.withHour(15).withMinute(35).withSecond(0).withNano(0)
+
+        if (now.isAfter(marketCloseToday)) {
+            println("🏖️ [Fyers Live] Market already closed for today ($now). Skipping strategy execution until tomorrow.")
+            TelegramNotifier.sendAlert("🏖️ [Fyers Live] Market already closed for today. Daemon will wait for tomorrow's session.")
+            return
+        }
+
+        if (now.isBefore(target925)) {
+            val waitMillis = Duration.between(now, target925).toMillis()
+            println("⏳ [Fyers Live] Current time is ${now.toLocalTime()}. Waiting until 9:25 AM IST (${waitMillis / 1000 / 60} minutes) to start trading session...")
+            TelegramNotifier.sendAlert("⏳ [Fyers Live] Authenticated & connected. Waiting until 9:25 AM IST to start trading session...")
+            delay(waitMillis)
+        } else {
+            println("🚀 [Fyers Live] Starting strategy execution immediately at ${now.toLocalTime()}...")
+        }
+
         val today = LocalDate.now().toString()
         println("==================================================")
         println("🔴 [STRICT LIVE TRADING] 9:25 AM STRATEGY - $today")
