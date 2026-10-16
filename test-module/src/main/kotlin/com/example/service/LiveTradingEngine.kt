@@ -460,10 +460,15 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
             override fun OnTrade(json: JSONObject?) {}
         }
 
+        // Wait 3 seconds for previous socket connection slot to be released by Fyers server
+        delay(3000L)
+
         try {
-            fyersSocket.ConnectHSM(ChannelModes.LITE)
+            retryWithBackoff(maxRetries = 5) {
+                fyersSocket.ConnectHSM(ChannelModes.LITE)
+            }
         } catch (e: Exception) {
-            val errMessage = "🚨 [Fyers Live Critical Error] Failed to connect management WebSocket: ${e.message}"
+            val errMessage = "🚨 [Fyers Live Critical Error] Failed to connect management WebSocket after retries: ${e.message}"
             println("❌ $errMessage")
             TelegramNotifier.sendAlert(errMessage)
         }
