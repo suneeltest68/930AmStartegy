@@ -208,12 +208,12 @@ fun main() = runBlocking {
             try {
                 strategyEngine.executeLiveStrategy(appId, activeToken)
 
-                // Keep daemon alive during market hours until 3:35 PM IST today
+                // Keep daemon alive during market hours until 3:25 PM IST today
                 val now = ZonedDateTime.now(istZone)
-                val marketCloseTimeToday = now.withHour(15).withMinute(35).withSecond(0).withNano(0)
+                val marketCloseTimeToday = now.withHour(15).withMinute(25).withSecond(0).withNano(0)
                 if (now.isBefore(marketCloseTimeToday)) {
                     val waitDuration = Duration.between(now, marketCloseTimeToday).toMillis()
-                    println("[Daemon] Trading session active. Waiting until market close at 3:35 PM IST (${waitDuration / 1000 / 60} minutes remaining)...")
+                    println("[Daemon] Trading session active. Waiting until market close at 3:25 PM IST (${waitDuration / 1000 / 60} minutes remaining)...")
                     delay(waitDuration)
                 }
             } catch (e: Exception) {
@@ -221,6 +221,11 @@ fun main() = runBlocking {
                 TelegramNotifier.sendAlert("❌ [Fyers Daemon] Error during execution: ${e.message}")
             }
         }
+
+        println("[Daemon] 💤 Trading session completed & all connections closed. Hard sleeping until 9:00 AM IST tomorrow...")
+        try {
+            TelegramNotifier.sendAlert("💤 [Fyers Daemon] Trading session completed & all connections closed. Bot entering hard sleep until 9:00 AM IST tomorrow.")
+        } catch (_: Exception) {}
 
         // Sleep 10 minutes before looping to ensure we don't double-trigger on the same day
         delay(10 * 60 * 1000L)

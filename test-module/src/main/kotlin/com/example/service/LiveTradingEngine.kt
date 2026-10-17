@@ -30,7 +30,7 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
         val istZone = ZoneId.of("Asia/Kolkata")
         val now = ZonedDateTime.now(istZone)
         val target925 = now.withHour(9).withMinute(25).withSecond(0).withNano(0)
-        val marketCloseToday = now.withHour(15).withMinute(35).withSecond(0).withNano(0)
+        val marketCloseToday = now.withHour(15).withMinute(25).withSecond(0).withNano(0)
 
         if (now.isAfter(marketCloseToday)) {
             println("🏖️ [Fyers Live] Market already closed for today ($now). Skipping strategy execution until tomorrow.")
@@ -186,6 +186,8 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
         var selectedCeSymbol: String? = null
         var selectedPeSymbol: String? = null
 
+        var sessionActive = true
+
         val fyersSocket = FyersSocket(3)
         setSocketCredentials(fyersSocket, appId, accessToken)
 
@@ -264,6 +266,7 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                                 if (symbol == ceSym) {
                                     if (prevPrice < 180.0 && ltp >= 180.0) {
                                         println("🚀 [SDK WS BREAKOUT] CE ($symbol) crossed upward through 180 at $nowTime with LTP $ltp")
+                                        sessionActive = false
                                         entryResultDeferred.complete(LiveTradeSignal(symbol, "CE", ltp, nowTime.toString()))
                                         try { fyersSocket.Close() } catch (_: Exception) {}
                                     }
@@ -271,6 +274,7 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                                 } else if (symbol == peSym) {
                                     if (prevPrice < 180.0 && ltp >= 180.0) {
                                         println("🚀 [SDK WS BREAKOUT] PE ($symbol) crossed upward through 180 at $nowTime with LTP $ltp")
+                                        sessionActive = false
                                         entryResultDeferred.complete(LiveTradeSignal(symbol, "PE", ltp, nowTime.toString()))
                                         try { fyersSocket.Close() } catch (_: Exception) {}
                                     }
@@ -285,10 +289,15 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
             }
 
             override fun OnClose(msg: String?) {
-                println("🔒 [FyersSocket] Closed: $msg. Attempting auto-reconnect...")
-                try {
-                    fyersSocket.ConnectHSM(ChannelModes.LITE)
-                } catch (_: Exception) {}
+                println("🔒 [FyersSocket] Closed: $msg.")
+                if (sessionActive && LocalTime.now().isBefore(LocalTime.of(15, 25, 0))) {
+                    println("Attempting auto-reconnect...")
+                    try {
+                        fyersSocket.ConnectHSM(ChannelModes.LITE)
+                    } catch (_: Exception) {}
+                } else {
+                    println("Session ended or market closed. Skipping auto-reconnect.")
+                }
             }
 
             override fun OnError(json: JSONObject?) {
@@ -323,10 +332,12 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                     }
                     delay(500L)
                 }
+                sessionActive = false
                 entryResultDeferred.complete(null)
                 null
             }
         } catch (_: Exception) {
+            sessionActive = false
             null
         }
 
@@ -440,10 +451,15 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
             }
 
             override fun OnClose(msg: String?) {
-                println("🔒 [Management FyersSocket] Closed. Attempting reconnect...")
-                try {
-                    fyersSocket.ConnectHSM(ChannelModes.LITE)
-                } catch (_: Exception) {}
+                println("🔒 [Management FyersSocket] Closed.")
+                if (isPositionOpen && LocalTime.now().isBefore(LocalTime.of(15, 25, 0))) {
+                    println("Attempting reconnect...")
+                    try {
+                        fyersSocket.ConnectHSM(ChannelModes.LITE)
+                    } catch (_: Exception) {}
+                } else {
+                    println("Position closed or market closed. Skipping reconnect.")
+                }
             }
 
             override fun OnError(json: JSONObject?) {
@@ -473,9 +489,9 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
             TelegramNotifier.sendAlert(errMessage)
         }
 
-        // Keep active until position closes or 3:30 PM market close
+        // Keep active until position closes or 3:25 PM market close
         while (isPositionOpen) {
-            if (LocalTime.now().isAfter(LocalTime.of(15, 30, 0))) {
+            if (LocalTime.now().isAfter(LocalTime.of(15, 25, 0))) {
                 isPositionOpen = false
                 val pnl = (highestPrice - signal.entryPrice) * quantity
                 println("⏰ [Market Close] Position closed at session end.")
