@@ -73,8 +73,9 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                 if (res1min != null && res1min.has("candles")) {
                     val candles = res1min.getJSONArray("candles")
                     if (candles.length() > 0) {
-                        fetchedPrice = candles.getJSONArray(0).getDouble(1) // Open of first 1-min candle
-                        println("📊 [Live] Fetched Spot from Today's 1-min candles: $fetchedPrice")
+                        val lastCandle = candles.getJSONArray(candles.length() - 1)
+                        fetchedPrice = lastCandle.getDouble(4) // Close of latest 1-min candle (live spot at 9:25 AM)
+                        println("📊 [Live] Fetched Real-Time Spot from Latest 1-min candle Close: $fetchedPrice")
                     }
                 }
 
@@ -182,7 +183,6 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
         val entryResultDeferred = CompletableDeferred<LiveTradeSignal?>()
         val symbolPricesAt925 = mutableMapOf<String, Double>()
         val lastPrices = mutableMapOf<String, Double>()
-        var isSnapshotCaptured = false
         var selectedCeSymbol: String? = null
         var selectedPeSymbol: String? = null
 
@@ -210,76 +210,74 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                     val ltp = json.optDouble("ltp", json.optDouble("lp", 0.0))
 
                     if (symbol.isNotEmpty() && ltp > 0.0) {
-                        // Phase 1: Capture 9:25 AM Snapshot using the first received tick for each symbol (clock-drift immune)
-                        if (!isSnapshotCaptured) {
-                            if (!symbolPricesAt925.containsKey(symbol)) {
-                                symbolPricesAt925[symbol] = ltp
-                                lastPrices[symbol] = ltp
+                        if (!symbolPricesAt925.containsKey(symbol)) {
+                            symbolPricesAt925[symbol] = ltp
+                            lastPrices[symbol] = ltp
+                        }
+
+                        // Continuous Search until 9:32 AM: Only wishlist when BOTH CE and PE are in range ₹155-175
+                        if (selectedCeSymbol == null || selectedPeSymbol == null) {
+                            var bestCeScore = Double.MAX_VALUE
+                            var bestPeScore = Double.MAX_VALUE
+                            var cePrice = 0.0
+                            var pePrice = 0.0
+                            var foundCe: String? = null
+                            var foundPe: String? = null
+
+                            for ((sym, price) in symbolPricesAt925) {
+                                val info = symbolToStrikeMap[sym] ?: continue
+                                if (price in 155.0..175.0) {
+                                    val diff = 175.0 - price
+                                    if (info.second == "CE" && diff < bestCeScore) {
+                                        bestCeScore = diff
+                                        foundCe = sym
+                                        cePrice = price
+                                    } else if (info.second == "PE" && diff < bestPeScore) {
+                                        bestPeScore = diff
+                                        foundPe = sym
+                                        pePrice = price
+                                    }
+                                }
                             }
-                            // Once we have collected quotes for a substantial number of symbols (or after 5 seconds), trigger selection
-                            if (symbolPricesAt925.size >= (allCandidateSymbols.size * 0.7).toInt() || symbolPricesAt925.size >= 25) {
-                                isSnapshotCaptured = true
-                                var bestCeScore = Double.MAX_VALUE
-                                var bestPeScore = Double.MAX_VALUE
-                                var ce925Price = 0.0
-                                var pe925Price = 0.0
 
-                                for ((sym, price) in symbolPricesAt925) {
-                                    val info = symbolToStrikeMap[sym] ?: continue
-                                    if (price < 180.0) {
-                                        val diff = 180.0 - price
-                                        if (info.second == "CE" && diff < bestCeScore) {
-                                            bestCeScore = diff
-                                            selectedCeSymbol = sym
-                                            ce925Price = price
-                                        } else if (info.second == "PE" && diff < bestPeScore) {
-                                            bestPeScore = diff
-                                            selectedPeSymbol = sym
-                                            pe925Price = price
-                                        }
-                                    }
+                            if (foundCe != null && foundPe != null) {
+                                selectedCeSymbol = foundCe
+                                selectedPeSymbol = foundPe
+
+                                println("🎯 [Watchlist Complete] Selected Live CE: $foundCe @ ₹$cePrice | Selected Live PE: $foundPe @ ₹$pePrice")
+                                scope.launch {
+                                    TelegramNotifier.sendAlert("🎯 [9:25 AM Trade Started - SDK WebSocket] Watchlisted Strikes (Range ₹155-175):\n🟢 CE: $foundCe @ ₹%.2f\n🔴 PE: $foundPe @ ₹%.2f".format(cePrice, pePrice))
                                 }
 
-                                println("📌 [FyersSocket Snapshot] Selected Live CE: $selectedCeSymbol @ ₹$ce925Price | Selected Live PE: $selectedPeSymbol @ ₹$pe925Price")
-
-                                val ceSym = selectedCeSymbol
-                                val peSym = selectedPeSymbol
-                                if (ceSym != null && peSym != null) {
-                                    scope.launch {
-                                        TelegramNotifier.sendAlert("🎯 [9:25 AM Trade Started - SDK WebSocket] Watchlisted Strikes:\n🟢 CE: $ceSym @ ₹%.2f\n🔴 PE: $peSym @ ₹%.2f".format(ce925Price, pe925Price))
-                                    }
-                                    // Focus subscription strictly on selected CE and PE
-                                    try { fyersSocket.UnSubscribeData(allCandidateSymbols) } catch (_: Exception) {}
-                                    try { fyersSocket.SubscribeData(listOf(ceSym, peSym)) } catch (_: Exception) {}
-                                }
+                                // Focus subscription strictly on selected CE and PE
+                                try { fyersSocket.UnSubscribeData(allCandidateSymbols) } catch (_: Exception) {}
+                                try { fyersSocket.SubscribeData(listOf(foundCe, foundPe)) } catch (_: Exception) {}
                             }
                         }
 
-                        // Phase 2: Observation & Breakout Window (9:25 to 9:30 AM)
+                        // Phase 2: Observation & Breakout Window (9:25 to 9:32 AM)
                         val ceSym = selectedCeSymbol
                         val peSym = selectedPeSymbol
                         val nowTime = LocalTime.now()
-                        if (isSnapshotCaptured && ceSym != null && peSym != null) {
-                            val observationEnd = LocalTime.of(9, 30, 0)
-                            if (nowTime.isBefore(observationEnd)) {
-                                val prevPrice = lastPrices[symbol] ?: ltp
-                                if (symbol == ceSym) {
-                                    if (prevPrice < 180.0 && ltp >= 180.0) {
-                                        println("🚀 [SDK WS BREAKOUT] CE ($symbol) crossed upward through 180 at $nowTime with LTP $ltp")
-                                        sessionActive = false
-                                        entryResultDeferred.complete(LiveTradeSignal(symbol, "CE", ltp, nowTime.toString()))
-                                        try { fyersSocket.Close() } catch (_: Exception) {}
-                                    }
-                                    lastPrices[symbol] = ltp
-                                } else if (symbol == peSym) {
-                                    if (prevPrice < 180.0 && ltp >= 180.0) {
-                                        println("🚀 [SDK WS BREAKOUT] PE ($symbol) crossed upward through 180 at $nowTime with LTP $ltp")
-                                        sessionActive = false
-                                        entryResultDeferred.complete(LiveTradeSignal(symbol, "PE", ltp, nowTime.toString()))
-                                        try { fyersSocket.Close() } catch (_: Exception) {}
-                                    }
-                                    lastPrices[symbol] = ltp
+                        val observationEnd = LocalTime.of(9, 32, 0)
+                        if (nowTime.isBefore(observationEnd) && ceSym != null && peSym != null) {
+                            val prevPrice = lastPrices[symbol] ?: ltp
+                            if (symbol == ceSym) {
+                                if (prevPrice < 180.0 && ltp >= 180.0) {
+                                    println("🚀 [SDK WS BREAKOUT] CE ($symbol) crossed upward through 180 at $nowTime with LTP $ltp")
+                                    sessionActive = false
+                                    entryResultDeferred.complete(LiveTradeSignal(symbol, "CE", ltp, nowTime.toString()))
+                                    try { fyersSocket.Close() } catch (_: Exception) {}
                                 }
+                                lastPrices[symbol] = ltp
+                            } else if (symbol == peSym) {
+                                if (prevPrice < 180.0 && ltp >= 180.0) {
+                                    println("🚀 [SDK WS BREAKOUT] PE ($symbol) crossed upward through 180 at $nowTime with LTP $ltp")
+                                    sessionActive = false
+                                    entryResultDeferred.complete(LiveTradeSignal(symbol, "PE", ltp, nowTime.toString()))
+                                    try { fyersSocket.Close() } catch (_: Exception) {}
+                                }
+                                lastPrices[symbol] = ltp
                             }
                         }
                     }
@@ -323,10 +321,10 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
             throw e
         }
 
-        // Wait until 9:30 AM or breakout signal
+        // Wait until 9:32 AM or breakout signal
         val signal = try {
-            kotlinx.coroutines.withTimeout(6 * 60 * 1000L) {
-                while (LocalTime.now().isBefore(LocalTime.of(9, 30, 0))) {
+            kotlinx.coroutines.withTimeout(8 * 60 * 1000L) {
+                while (LocalTime.now().isBefore(LocalTime.of(9, 32, 0))) {
                     if (entryResultDeferred.isCompleted) {
                         return@withTimeout entryResultDeferred.await()
                     }
@@ -346,9 +344,9 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
         } catch (_: Exception) {}
 
         if (signal == null) {
-            println("⏸️ [No Trade] Neither CE nor PE crossed upward through ₹180 between 9:25 and 9:30 AM.")
+            println("⏸️ [No Trade] Neither CE nor PE crossed upward through ₹180 between 9:25 and 9:32 AM.")
             scope.launch {
-                TelegramNotifier.sendAlert("⏸️ [9:30 AM No Entry] Neither CE nor PE crossed upward through ₹180 between 9:25 and 9:30 AM. No trade today.")
+                TelegramNotifier.sendAlert("⏸️ [9:32 AM No Entry] Neither CE nor PE crossed upward through ₹180 between 9:25 and 9:32 AM (Strikes scanned between ₹155 and ₹175). No trade today.")
             }
             return
         }
