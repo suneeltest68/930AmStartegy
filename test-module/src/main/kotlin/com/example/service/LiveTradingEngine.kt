@@ -68,7 +68,8 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                     resolution = "1",
                     rangeFrom = today,
                     rangeTo = today,
-                    showError = false
+                    showError = false,
+                    useCache = false
                 )
                 if (res1min != null && res1min.has("candles")) {
                     val candles = res1min.getJSONArray("candles")
@@ -88,7 +89,8 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                         resolution = "D",
                         rangeFrom = today,
                         rangeTo = today,
-                        showError = false
+                        showError = false,
+                        useCache = false
                     )
                     if (resDaily != null && resDaily.has("candles")) {
                         val candles = resDaily.getJSONArray("candles")
@@ -111,7 +113,8 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                             resolution = "D",
                             rangeFrom = dateStr,
                             rangeTo = dateStr,
-                            showError = false
+                            showError = false,
+                            useCache = false
                         )
                         if (resPast != null && resPast.has("candles")) {
                             val candles = resPast.getJSONArray("candles")
@@ -160,7 +163,8 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                         indexSymbol = indexSymbol,
                         spotPrice = strike.toDouble(),
                         optionType = type,
-                        expiryIndex = 0
+                        expiryIndex = 0,
+                        useCache = false
                     )
                     allCandidateSymbols.add(symbol)
                     symbolToStrikeMap[symbol] = Pair(strike, type)

@@ -64,13 +64,14 @@ object OptionUtils {
         indexSymbol: String,
         spotPrice: Double,
         optionType: String,
-        expiryIndex: Int = 0
+        expiryIndex: Int = 0,
+        useCache: Boolean = true
     ): String {
         val strikeInterval = if (indexSymbol.contains("BANKNIFTY", ignoreCase = true) || indexSymbol.contains("NIFTYBANK", ignoreCase = true) || indexSymbol.contains("SENSEX", ignoreCase = true)) 100 else 50
         val atmStrike = calculateAtmStrike(spotPrice, strikeInterval)
 
         val cacheKey = indexSymbol
-        var optionChain = optionChainCache[cacheKey]
+        var optionChain = if (useCache) optionChainCache[cacheKey] else null
         if (optionChain == null) {
             var attempts = 0
             while (attempts < 3 && optionChain == null) {
@@ -81,7 +82,9 @@ object OptionUtils {
             if (optionChain == null) {
                 throw IllegalStateException("Failed to fetch option chain from Fyers API for symbol $indexSymbol after retries (Rate limit 429)")
             }
-            optionChainCache[cacheKey] = optionChain
+            if (useCache) {
+                optionChainCache[cacheKey] = optionChain
+            }
         }
 
         var expiryDateStr: String? = null
