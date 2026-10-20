@@ -129,11 +129,6 @@ object OptionUtils {
         }
 
         val targetExpiryCode = "$shortYear$monthCode$day"
-        val underlyingPrefix = when {
-            indexSymbol.contains("BANKNIFTY", ignoreCase = true) || indexSymbol.contains("NIFTYBANK", ignoreCase = true) -> "NSE:BANKNIFTY"
-            indexSymbol.contains("SENSEX", ignoreCase = true) -> "BSE:SENSEX"
-            else -> "NSE:NIFTY"
-        }
 
         // First attempt: Search optionsChain array for exact matching contract with targetExpiryCode or isoDate
         if (optionChain.has("data")) {
@@ -159,7 +154,111 @@ object OptionUtils {
             }
         }
 
-        return "$underlyingPrefix$targetExpiryCode$atmStrike$optionType"
+        throw IllegalStateException("Could not resolve valid option symbol from Fyers option chain for strike $atmStrike ($optionType)")
+    }
+
+    /**
+     * Resolves all candidate option symbols (ATM ± range) in a single Fyers Option Chain API call
+     * to prevent rate limits (HTTP 429) and invalid symbol generation.
+     */
+    suspend fun resolveAllCandidateOptionSymbols(
+        viewModel: AuthViewModel,
+        appId: String,
+        token: String,
+        indexSymbol: String,
+        atmStrike: Int,
+        strikeRange: IntRange = -10..10,
+        expiryIndex: Int = 0,
+        useCache: Boolean = true
+    ): Map<String, Pair<Int, String>> {
+        val strikeInterval = if (indexSymbol.contains("BANKNIFTY", ignoreCase = true) || indexSymbol.contains("NIFTYBANK", ignoreCase = true) || indexSymbol.contains("SENSEX", ignoreCase = true)) 100 else 50
+
+        val cacheKey = indexSymbol
+        var optionChain = if (useCache) optionChainCache[cacheKey] else null
+        if (optionChain == null) {
+            var attempts = 0
+            while (attempts < 3 && optionChain == null) {
+                if (attempts > 0) kotlinx.coroutines.delay(1000L * attempts)
+                optionChain = viewModel.fetchOptionChain(appId, token, indexSymbol, 15)
+                attempts++
+            }
+            if (optionChain == null) {
+                throw IllegalStateException("Failed to fetch option chain from Fyers API for symbol $indexSymbol after retries (Rate limit 429)")
+            }
+            if (useCache) {
+                optionChainCache[cacheKey] = optionChain
+            }
+        }
+
+        var expiryDateStr: String? = null
+        if (optionChain.has("data")) {
+            val dataObj = optionChain.getJSONObject("data")
+            val expiryArray = dataObj.optJSONArray("expiryData") ?: dataObj.optJSONArray("expiry_dates")
+            if (expiryArray != null && expiryIndex in 0 until expiryArray.length()) {
+                val expiryObj = expiryArray.optJSONObject(expiryIndex)
+                expiryDateStr = expiryObj?.optString("date", expiryObj.optString("expiry", ""))
+                    ?: expiryArray.optString(expiryIndex, "")
+            }
+        }
+
+        if (expiryDateStr.isNullOrEmpty() || expiryDateStr.length < 10) {
+            throw IllegalStateException("Could not find expiry date for expiryIndex $expiryIndex in option chain response")
+        }
+
+        val day = expiryDateStr.substring(0, 2)
+        val monthNum = expiryDateStr.substring(3, 5)
+        val fullYear = if (expiryDateStr.length >= 10) expiryDateStr.substring(6, 10) else "20" + expiryDateStr.substring(8, 10)
+        val shortYear = fullYear.substring(2, 4)
+        val isoDate = "$fullYear-$monthNum-$day"
+
+        val monthCode = when (monthNum) {
+            "01" -> "1"
+            "02" -> "2"
+            "03" -> "3"
+            "04" -> "4"
+            "05" -> "5"
+            "06" -> "6"
+            "07" -> "7"
+            "08" -> "8"
+            "09" -> "9"
+            "10" -> "O"
+            "11" -> "N"
+            "12" -> "D"
+            else -> ""
+        }
+
+        val targetExpiryCode = "$shortYear$monthCode$day"
+        val symbolToStrikeMap = mutableMapOf<String, Pair<Int, String>>()
+        val candidateStrikes = strikeRange.map { atmStrike + (it * strikeInterval) }.toSet()
+
+        if (optionChain.has("data")) {
+            val dataObj = optionChain.getJSONObject("data")
+            val optionsArray = dataObj.optJSONArray("optionsChain") ?: dataObj.optJSONArray("options")
+            if (optionsArray != null) {
+                for (i in 0 until optionsArray.length()) {
+                    val optObj = optionsArray.getJSONObject(i)
+                    val strike = optObj.optDouble("strike_price", optObj.optDouble("strikePrice", optObj.optDouble("strike", 0.0))).toInt()
+                    val symbol = optObj.optString("symbol", "")
+                    val type = optObj.optString("option_type", optObj.optString("optionType", ""))
+                    val optExpiry = optObj.optString("expiry", optObj.optString("expiry_date", ""))
+
+                    if (strike in candidateStrikes && symbol.isNotEmpty()) {
+                        val isExpiryMatch = symbol.contains(targetExpiryCode) ||
+                                (optExpiry.isNotEmpty() && (optExpiry == isoDate || optExpiry == expiryDateStr || optExpiry.contains(isoDate)))
+                        if (isExpiryMatch) {
+                            val optionTypeNormalized = if (type.equals("CE", true) || symbol.endsWith("CE")) "CE" else "PE"
+                            symbolToStrikeMap[symbol] = Pair(strike, optionTypeNormalized)
+                        }
+                    }
+                }
+            }
+        }
+
+        if (symbolToStrikeMap.isEmpty()) {
+            throw IllegalStateException("No candidate option symbols found in Fyers option chain response for ATM strike $atmStrike")
+        }
+
+        return symbolToStrikeMap
     }
 
     /**

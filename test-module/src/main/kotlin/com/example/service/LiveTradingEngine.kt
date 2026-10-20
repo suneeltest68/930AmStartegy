@@ -144,33 +144,18 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
         val atmStrike = OptionUtils.calculateAtmStrike(spotPrice, 50)
         println("🎯 Calculated ATM Strike: $atmStrike")
 
-        // 2. Resolve Candidate Symbols for ATM ± 10 strikes (CE and PE)
-        val candidateStrikes = mutableListOf<Int>()
-        for (offset in -10..10) {
-            candidateStrikes.add(atmStrike + (offset * 50))
-        }
-
-        val allCandidateSymbols = mutableListOf<String>()
-        val symbolToStrikeMap = mutableMapOf<String, Pair<Int, String>>() // symbol -> (strike, type)
-
-        for (strike in candidateStrikes) {
-            for (type in listOf("CE", "PE")) {
-                try {
-                    val symbol = OptionUtils.resolveWeeklyOptionSymbol(
-                        viewModel = viewModel,
-                        appId = appId,
-                        token = accessToken,
-                        indexSymbol = indexSymbol,
-                        spotPrice = strike.toDouble(),
-                        optionType = type,
-                        expiryIndex = 0,
-                        useCache = false
-                    )
-                    allCandidateSymbols.add(symbol)
-                    symbolToStrikeMap[symbol] = Pair(strike, type)
-                } catch (_: Exception) {}
-            }
-        }
+        // 2. Resolve Candidate Symbols for ATM ± 10 strikes (CE and PE) in a single API call
+        val symbolToStrikeMap = OptionUtils.resolveAllCandidateOptionSymbols(
+            viewModel = viewModel,
+            appId = appId,
+            token = accessToken,
+            indexSymbol = indexSymbol,
+            atmStrike = atmStrike,
+            strikeRange = -10..10,
+            expiryIndex = 0,
+            useCache = false
+        )
+        val allCandidateSymbols = symbolToStrikeMap.keys.toList()
 
         if (allCandidateSymbols.isEmpty()) {
             val errMessage = "🚨 [Fyers Live Critical Error] Failed to resolve any candidate option symbols for ATM strike $atmStrike."
