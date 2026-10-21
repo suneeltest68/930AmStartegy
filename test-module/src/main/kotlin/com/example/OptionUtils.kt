@@ -227,7 +227,26 @@ object OptionUtils {
             else -> ""
         }
 
-        val targetExpiryCode = "$shortYear$monthCode$day"
+        val monthName = when (monthNum) {
+            "01" -> "JAN"
+            "02" -> "FEB"
+            "03" -> "MAR"
+            "04" -> "APR"
+            "05" -> "MAY"
+            "06" -> "JUN"
+            "07" -> "JUL"
+            "08" -> "AUG"
+            "09" -> "SEP"
+            "10" -> "OCT"
+            "11" -> "NOV"
+            "12" -> "DEC"
+            else -> ""
+        }
+
+        val targetExpiryCode1 = "$shortYear$monthCode$day"
+        val targetExpiryCode2 = "$shortYear$monthName$day"
+        val targetExpiryCode3 = "$day$monthName$shortYear"
+
         val symbolToStrikeMap = mutableMapOf<String, Pair<Int, String>>()
         val candidateStrikes = strikeRange.map { atmStrike + (it * strikeInterval) }.toSet()
 
@@ -237,17 +256,22 @@ object OptionUtils {
             if (optionsArray != null) {
                 for (i in 0 until optionsArray.length()) {
                     val optObj = optionsArray.getJSONObject(i)
-                    val strike = optObj.optDouble("strike_price", optObj.optDouble("strikePrice", optObj.optDouble("strike", 0.0))).toInt()
+                    val strikeDouble = optObj.optDouble("strike_price", optObj.optDouble("strikePrice", optObj.optDouble("strike", 0.0)))
+                    val strikeInt = strikeDouble.toInt()
                     val symbol = optObj.optString("symbol", "")
                     val type = optObj.optString("option_type", optObj.optString("optionType", ""))
                     val optExpiry = optObj.optString("expiry", optObj.optString("expiry_date", ""))
 
-                    if (strike in candidateStrikes && symbol.isNotEmpty()) {
-                        val isExpiryMatch = symbol.contains(targetExpiryCode) ||
+                    val isStrikeMatch = candidateStrikes.any { abs(strikeDouble - it.toDouble()) < 1.0 }
+                    if (isStrikeMatch && symbol.isNotEmpty()) {
+                        val isExpiryMatch = symbol.contains(targetExpiryCode1, ignoreCase = true) ||
+                                symbol.contains(targetExpiryCode2, ignoreCase = true) ||
+                                symbol.contains(targetExpiryCode3, ignoreCase = true) ||
                                 (optExpiry.isNotEmpty() && (optExpiry == isoDate || optExpiry == expiryDateStr || optExpiry.contains(isoDate)))
+
                         if (isExpiryMatch) {
                             val optionTypeNormalized = if (type.equals("CE", true) || symbol.endsWith("CE")) "CE" else "PE"
-                            symbolToStrikeMap[symbol] = Pair(strike, optionTypeNormalized)
+                            symbolToStrikeMap[symbol] = Pair(strikeInt, optionTypeNormalized)
                         }
                     }
                 }
