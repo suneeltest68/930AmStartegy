@@ -271,7 +271,14 @@ object OptionUtils {
 
                         if (isExpiryMatch) {
                             val optionTypeNormalized = if (type.equals("CE", true) || symbol.endsWith("CE")) "CE" else "PE"
-                            symbolToStrikeMap[symbol] = Pair(strikeInt, optionTypeNormalized)
+                            val isAllowed = when (optionTypeNormalized) {
+                                "CE" -> strikeInt <= atmStrike + (2 * strikeInterval)
+                                "PE" -> strikeInt >= atmStrike - (2 * strikeInterval)
+                                else -> false
+                            }
+                            if (isAllowed) {
+                                symbolToStrikeMap[symbol] = Pair(strikeInt, optionTypeNormalized)
+                            }
                         }
                     }
                 }
@@ -293,7 +300,14 @@ object OptionUtils {
                     val isStrikeMatch = candidateStrikes.any { abs(strikeDouble - it.toDouble()) < 1.0 }
                     if (isStrikeMatch && symbol.isNotEmpty()) {
                         val optionTypeNormalized = if (type.equals("CE", true) || symbol.endsWith("CE")) "CE" else "PE"
-                        symbolToStrikeMap[symbol] = Pair(strikeInt, optionTypeNormalized)
+                        val isAllowed = when (optionTypeNormalized) {
+                            "CE" -> strikeInt <= atmStrike + (2 * strikeInterval)
+                            "PE" -> strikeInt >= atmStrike - (2 * strikeInterval)
+                            else -> false
+                        }
+                        if (isAllowed) {
+                            symbolToStrikeMap[symbol] = Pair(strikeInt, optionTypeNormalized)
+                        }
                     }
                 }
             }

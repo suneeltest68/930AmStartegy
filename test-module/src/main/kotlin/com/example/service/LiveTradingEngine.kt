@@ -29,7 +29,7 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
     suspend fun executeLiveStrategy(appId: String, accessToken: String) {
         val istZone = ZoneId.of("Asia/Kolkata")
         val now = ZonedDateTime.now(istZone)
-        val target925 = now.withHour(9).withMinute(25).withSecond(0).withNano(0)
+        val target925 = now.withHour(11).withMinute(12).withSecond(0).withNano(0)
         val marketCloseToday = now.withHour(15).withMinute(25).withSecond(0).withNano(0)
 
         if (now.isAfter(marketCloseToday)) {
@@ -174,6 +174,7 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
         val lastPrices = mutableMapOf<String, Double>()
         var selectedCeSymbol: String? = null
         var selectedPeSymbol: String? = null
+        var lastSearchLogTime = 0L
 
         var sessionActive = true
 
@@ -206,6 +207,12 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
 
                         // Continuous Search until 9:32 AM: Only wishlist when BOTH CE and PE are in range ₹155-175
                         if (selectedCeSymbol == null || selectedPeSymbol == null) {
+                            val currentTime = System.currentTimeMillis()
+                            if (currentTime - lastSearchLogTime > 10000L) {
+                                lastSearchLogTime = currentTime
+                                println("⏳ [Continuous Search] Still scanning for valid CE & PE in range ₹155–₹175 (Collected ticks for ${symbolPricesAt925.size}/${allCandidateSymbols.size} candidate symbols)...")
+                            }
+
                             var bestCeScore = Double.MAX_VALUE
                             var bestPeScore = Double.MAX_VALUE
                             var cePrice = 0.0
@@ -241,6 +248,16 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                                 // Focus subscription strictly on selected CE and PE
                                 try { fyersSocket.UnSubscribeData(allCandidateSymbols) } catch (_: Exception) {}
                                 try { fyersSocket.SubscribeData(listOf(foundCe, foundPe)) } catch (_: Exception) {}
+
+                                // Start 10-second background status ticker
+                                scope.launch {
+                                    while (LocalTime.now().isBefore(LocalTime.of(9, 32, 0)) && sessionActive) {
+                                        delay(10000L)
+                                        val ceLtp = lastPrices[foundCe] ?: 0.0
+                                        val peLtp = lastPrices[foundPe] ?: 0.0
+                                        println("👀 [Watchlist Status] Time: ${LocalTime.now()} | CE ($foundCe): ₹$ceLtp (Target > 180) | PE ($foundPe): ₹$peLtp (Target > 180)")
+                                    }
+                                }
                             }
                         }
 
@@ -313,7 +330,7 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
         // Wait until 9:32 AM or breakout signal
         val signal = try {
             kotlinx.coroutines.withTimeout(8 * 60 * 1000L) {
-                while (LocalTime.now().isBefore(LocalTime.of(9, 32, 0))) {
+                while (LocalTime.now().isBefore(LocalTime.of(13, 32, 0))) {
                     if (entryResultDeferred.isCompleted) {
                         return@withTimeout entryResultDeferred.await()
                     }
