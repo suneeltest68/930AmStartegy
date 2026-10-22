@@ -29,7 +29,7 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
     suspend fun executeLiveStrategy(appId: String, accessToken: String) {
         val istZone = ZoneId.of("Asia/Kolkata")
         val now = ZonedDateTime.now(istZone)
-        val target925 = now.withHour(11).withMinute(12).withSecond(0).withNano(0)
+        val target925 = now.withHour(9).withMinute(25).withSecond(0).withNano(0)
         val marketCloseToday = now.withHour(15).withMinute(25).withSecond(0).withNano(0)
 
         if (now.isAfter(marketCloseToday)) {
@@ -330,7 +330,7 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
         // Wait until 9:32 AM or breakout signal
         val signal = try {
             kotlinx.coroutines.withTimeout(8 * 60 * 1000L) {
-                while (LocalTime.now().isBefore(LocalTime.of(13, 32, 0))) {
+                while (LocalTime.now().isBefore(LocalTime.of(9, 32, 0))) {
                     if (entryResultDeferred.isCompleted) {
                         return@withTimeout entryResultDeferred.await()
                     }
