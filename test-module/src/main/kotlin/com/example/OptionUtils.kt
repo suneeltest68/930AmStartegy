@@ -67,7 +67,7 @@ object OptionUtils {
         expiryIndex: Int = 0,
         useCache: Boolean = true
     ): String {
-        val strikeInterval = if (indexSymbol.contains("BANKNIFTY", ignoreCase = true) || indexSymbol.contains("NIFTYBANK", ignoreCase = true) || indexSymbol.contains("SENSEX", ignoreCase = true)) 100 else 50
+        val strikeInterval = if (indexSymbol.contains("SENSEX", ignoreCase = true)) 100 else 50
         val atmStrike = calculateAtmStrike(spotPrice, strikeInterval)
 
         val cacheKey = indexSymbol
@@ -171,27 +171,131 @@ object OptionUtils {
         expiryIndex: Int = 0,
         useCache: Boolean = true
     ): Map<String, Pair<Int, String>> {
-        val strikeInterval = if (indexSymbol.contains("BANKNIFTY", ignoreCase = true) || indexSymbol.contains("NIFTYBANK", ignoreCase = true) || indexSymbol.contains("SENSEX", ignoreCase = true)) 100 else 50
-        val symbolToStrikeMap = mutableMapOf<String, Pair<Int, String>>()
+        val strikeInterval = if (indexSymbol.contains("SENSEX", ignoreCase = true)) 100 else 50
 
-        for (offset in strikeRange) {
-            val strike = atmStrike + (offset * strikeInterval)
-            for (type in listOf("CE", "PE")) {
-                try {
-                    val symbol = resolveWeeklyOptionSymbol(
-                        viewModel = viewModel,
-                        appId = appId,
-                        token = token,
-                        indexSymbol = indexSymbol,
-                        spotPrice = strike.toDouble(),
-                        optionType = type,
-                        expiryIndex = expiryIndex,
-                        useCache = useCache
-                    )
-                    if (symbol.isNotEmpty()) {
-                        symbolToStrikeMap[symbol] = Pair(strike, type)
+        val cacheKey = indexSymbol
+        var optionChain = if (useCache) optionChainCache[cacheKey] else null
+        if (optionChain == null) {
+            var attempts = 0
+            while (attempts < 3 && optionChain == null) {
+                if (attempts > 0) kotlinx.coroutines.delay(1000L * attempts)
+                optionChain = viewModel.fetchOptionChain(appId, token, indexSymbol, 15)
+                attempts++
+            }
+            if (optionChain == null) {
+                throw IllegalStateException("Failed to fetch option chain from Fyers API for symbol $indexSymbol after retries (Rate limit 429)")
+            }
+            if (useCache) {
+                optionChainCache[cacheKey] = optionChain
+            }
+        }
+
+        var expiryDateStr: String? = null
+        if (optionChain.has("data")) {
+            val dataObj = optionChain.getJSONObject("data")
+            val expiryArray = dataObj.optJSONArray("expiryData") ?: dataObj.optJSONArray("expiry_dates")
+            if (expiryArray != null && expiryIndex in 0 until expiryArray.length()) {
+                val expiryObj = expiryArray.optJSONObject(expiryIndex)
+                expiryDateStr = expiryObj?.optString("date", expiryObj.optString("expiry", ""))
+                    ?: expiryArray.optString(expiryIndex, "")
+            }
+        }
+
+        if (expiryDateStr.isNullOrEmpty() || expiryDateStr.length < 10) {
+            throw IllegalStateException("Could not find expiry date for expiryIndex $expiryIndex in option chain response")
+        }
+
+        val day = expiryDateStr.substring(0, 2)
+        val monthNum = expiryDateStr.substring(3, 5)
+        val fullYear = if (expiryDateStr.length >= 10) expiryDateStr.substring(6, 10) else "20" + expiryDateStr.substring(8, 10)
+        val shortYear = fullYear.substring(2, 4)
+        val isoDate = "$fullYear-$monthNum-$day"
+
+        val monthCode = when (monthNum) {
+            "01" -> "1"
+            "02" -> "2"
+            "03" -> "3"
+            "04" -> "4"
+            "05" -> "5"
+            "06" -> "6"
+            "07" -> "7"
+            "08" -> "8"
+            "09" -> "9"
+            "10" -> "O"
+            "11" -> "N"
+            "12" -> "D"
+            else -> ""
+        }
+
+        val monthName = when (monthNum) {
+            "01" -> "JAN"
+            "02" -> "FEB"
+            "03" -> "MAR"
+            "04" -> "APR"
+            "05" -> "MAY"
+            "06" -> "JUN"
+            "07" -> "JUL"
+            "08" -> "AUG"
+            "09" -> "SEP"
+            "10" -> "OCT"
+            "11" -> "NOV"
+            "12" -> "DEC"
+            else -> ""
+        }
+
+        val targetExpiryCode1 = "$shortYear$monthCode$day"
+        val targetExpiryCode2 = "$shortYear$monthName$day"
+        val targetExpiryCode3 = "$day$monthName$shortYear"
+
+        val symbolToStrikeMap = mutableMapOf<String, Pair<Int, String>>()
+        val candidateStrikes = strikeRange.map { atmStrike + (it * strikeInterval) }.toSet()
+
+        if (optionChain.has("data")) {
+            val dataObj = optionChain.getJSONObject("data")
+            val optionsArray = dataObj.optJSONArray("optionsChain") ?: dataObj.optJSONArray("options")
+            if (optionsArray != null) {
+                for (i in 0 until optionsArray.length()) {
+                    val optObj = optionsArray.getJSONObject(i)
+                    val strikeDouble = optObj.optDouble("strike_price", optObj.optDouble("strikePrice", optObj.optDouble("strike", 0.0)))
+                    val strikeInt = strikeDouble.toInt()
+                    val symbol = optObj.optString("symbol", "")
+                    val type = optObj.optString("option_type", optObj.optString("optionType", ""))
+                    val optExpiry = optObj.optString("expiry", optObj.optString("expiry_date", ""))
+
+                    val isStrikeMatch = candidateStrikes.any { abs(strikeDouble - it.toDouble()) < 1.0 }
+                    if (isStrikeMatch && symbol.isNotEmpty()) {
+                        val isExpiryMatch = symbol.contains(targetExpiryCode1, ignoreCase = true) ||
+                                symbol.contains(targetExpiryCode2, ignoreCase = true) ||
+                                symbol.contains(targetExpiryCode3, ignoreCase = true) ||
+                                (optExpiry.isNotEmpty() && (optExpiry == isoDate || optExpiry == expiryDateStr || optExpiry.contains(isoDate)))
+
+                        if (isExpiryMatch) {
+                            val optionTypeNormalized = if (type.equals("CE", true) || symbol.endsWith("CE")) "CE" else "PE"
+                            symbolToStrikeMap[symbol] = Pair(strikeInt, optionTypeNormalized)
+                        }
                     }
-                } catch (_: Exception) {}
+                }
+            }
+        }
+
+        // Fallback: If no symbols matched strict expiry filters, accept any option matching candidate strikes
+        if (symbolToStrikeMap.isEmpty() && optionChain.has("data")) {
+            val dataObj = optionChain.getJSONObject("data")
+            val optionsArray = dataObj.optJSONArray("optionsChain") ?: dataObj.optJSONArray("options")
+            if (optionsArray != null) {
+                for (i in 0 until optionsArray.length()) {
+                    val optObj = optionsArray.getJSONObject(i)
+                    val strikeDouble = optObj.optDouble("strike_price", optObj.optDouble("strikePrice", optObj.optDouble("strike", 0.0)))
+                    val strikeInt = strikeDouble.toInt()
+                    val symbol = optObj.optString("symbol", "")
+                    val type = optObj.optString("option_type", optObj.optString("optionType", ""))
+
+                    val isStrikeMatch = candidateStrikes.any { abs(strikeDouble - it.toDouble()) < 1.0 }
+                    if (isStrikeMatch && symbol.isNotEmpty()) {
+                        val optionTypeNormalized = if (type.equals("CE", true) || symbol.endsWith("CE")) "CE" else "PE"
+                        symbolToStrikeMap[symbol] = Pair(strikeInt, optionTypeNormalized)
+                    }
+                }
             }
         }
 
