@@ -59,8 +59,8 @@ fun main() = runBlocking {
         println("[Auth] Using valid cached or environment Access Token.")
     }
 
-    val startDate = System.getenv("START_DATE") ?: dotenv["START_DATE"] ?: "2026-02-01"
-    val endDate = System.getenv("END_DATE") ?: dotenv["END_DATE"] ?: "2026-02-28"
+    val startDate = System.getenv("START_DATE") ?: dotenv["START_DATE"] ?: "2026-10-01"
+    val endDate = System.getenv("END_DATE") ?: dotenv["END_DATE"] ?: "2026-10-27"
 
     backtestEngine.runBacktest(appId, token, startDate, endDate)
 }

@@ -75,28 +75,27 @@ class HistoricalBacktestEngine(private val viewModel: AuthViewModel) {
                     continue
                 }
 
-                var spotPrice = 23000.0
+                var spotPrice: Double? = null
                 if (spotHistory.has("candles")) {
                     val candles = spotHistory.getJSONArray("candles")
                     if (candles.length() > 0) {
                         spotPrice = candles.getJSONArray(0).getDouble(4)
                     }
                 }
+
+                if (spotPrice == null || spotPrice <= 0.0) {
+                    println("❌ [Error] Failed to extract spot price for $dayStr. Skipping to next day...")
+                    currDate = currDate.plusDays(1)
+                    continue
+                }
                 println("📊 Nifty Spot Price: %.2f".format(spotPrice))
 
                 val atmStrike = OptionUtils.calculateAtmStrike(spotPrice, 50)
+                val strikeInterval = if (indexSymbol.contains("SENSEX", ignoreCase = true)) 100 else 50
                 val candidateStrikes = mutableListOf<Int>()
                 for (offset in -10..10) {
-                    candidateStrikes.add(atmStrike + (offset * 50))
+                    candidateStrikes.add(atmStrike + (offset * strikeInterval))
                 }
-
-                var selectedCeSymbol: String? = null
-                var selectedPeSymbol: String? = null
-                var ce925Price = 0.0
-                var pe925Price = 0.0
-
-                var bestCeScore = Double.MAX_VALUE
-                var bestPeScore = Double.MAX_VALUE
 
                 val isHistorical = LocalDate.parse(dayStr).isBefore(LocalDate.now().minusDays(7))
 
@@ -117,6 +116,14 @@ class HistoricalBacktestEngine(private val viewModel: AuthViewModel) {
                     var strikePeDelta = 0.0
 
                     for (type in listOf("CE", "PE")) {
+                        // Apply ITM, ATM, +2 OTM filter
+                        val isAllowed = when (type) {
+                            "CE" -> strike <= atmStrike + (2 * strikeInterval)
+                            "PE" -> strike >= atmStrike - (2 * strikeInterval)
+                            else -> false
+                        }
+                        if (!isAllowed) continue
+
                         try {
                             if (isHistorical) {
                                 val expiredRes = OptionUtils.resolveAndFetchExpiredDerivativeCandles(
@@ -136,30 +143,14 @@ class HistoricalBacktestEngine(private val viewModel: AuthViewModel) {
                                     if (type == "CE") ceCandlesMap[symbol] = candles else peCandlesMap[symbol] = candles
                                     val candle925 = candles.firstOrNull { it.timestamp.contains("09:25:") } ?: candles.firstOrNull()
                                     if (candle925 != null) {
-                                        val priceAt925 = candle925.close
-                                        val delta = calculateOptionDelta(spotPrice, strike.toDouble(), timeToExpiryYears, volatility, riskFreeRate, type == "CE")
-
                                         if (type == "CE") {
                                             strikeCeSymbol = symbol
-                                            strikeCePrice = priceAt925
-                                            strikeCeDelta = delta
+                                            strikeCePrice = candle925.close
+                                            strikeCeDelta = calculateOptionDelta(spotPrice, strike.toDouble(), timeToExpiryYears, volatility, riskFreeRate, true)
                                         } else {
                                             strikePeSymbol = symbol
-                                            strikePePrice = priceAt925
-                                            strikePeDelta = delta
-                                        }
-
-                                        if (priceAt925 < 180.0) {
-                                            val diff = 180.0 - priceAt925
-                                            if (type == "CE" && diff < bestCeScore) {
-                                                bestCeScore = diff
-                                                selectedCeSymbol = symbol
-                                                ce925Price = priceAt925
-                                            } else if (type == "PE" && diff < bestPeScore) {
-                                                bestPeScore = diff
-                                                selectedPeSymbol = symbol
-                                                pe925Price = priceAt925
-                                            }
+                                            strikePePrice = candle925.close
+                                            strikePeDelta = calculateOptionDelta(spotPrice, strike.toDouble(), timeToExpiryYears, volatility, riskFreeRate, false)
                                         }
                                     }
                                 }
@@ -179,35 +170,21 @@ class HistoricalBacktestEngine(private val viewModel: AuthViewModel) {
                                     if (type == "CE") ceCandlesMap[symbol] = candles else peCandlesMap[symbol] = candles
                                     val candle925 = candles.firstOrNull { it.timestamp.contains("09:25:") } ?: candles.firstOrNull()
                                     if (candle925 != null) {
-                                        val priceAt925 = candle925.close
-                                        val delta = calculateOptionDelta(spotPrice, strike.toDouble(), timeToExpiryYears, volatility, riskFreeRate, type == "CE")
-
                                         if (type == "CE") {
                                             strikeCeSymbol = symbol
-                                            strikeCePrice = priceAt925
-                                            strikeCeDelta = delta
+                                            strikeCePrice = candle925.close
+                                            strikeCeDelta = calculateOptionDelta(spotPrice, strike.toDouble(), timeToExpiryYears, volatility, riskFreeRate, true)
                                         } else {
                                             strikePeSymbol = symbol
-                                            strikePePrice = priceAt925
-                                            strikePeDelta = delta
-                                        }
-
-                                        if (priceAt925 < 180.0) {
-                                            val diff = 180.0 - priceAt925
-                                            if (type == "CE" && diff < bestCeScore) {
-                                                bestCeScore = diff
-                                                selectedCeSymbol = symbol
-                                                ce925Price = priceAt925
-                                            } else if (type == "PE" && diff < bestPeScore) {
-                                                bestPeScore = diff
-                                                selectedPeSymbol = symbol
-                                                pe925Price = priceAt925
-                                            }
+                                            strikePePrice = candle925.close
+                                            strikePeDelta = calculateOptionDelta(spotPrice, strike.toDouble(), timeToExpiryYears, volatility, riskFreeRate, false)
                                         }
                                     }
                                 }
                             }
-                        } catch (_: Exception) {}
+                        } catch (e: Exception) {
+                            println("⚠️ [Backtest Warning] Failed to fetch candles for strike $strike ($type) on $dayStr: ${e.message}")
+                        }
                     }
 
                     if (strikeCePrice > 0.0 || strikePePrice > 0.0) {
@@ -215,73 +192,117 @@ class HistoricalBacktestEngine(private val viewModel: AuthViewModel) {
                     }
                 }
 
-                printOptionChainTable(spotPrice, optionChainRows, selectedCeSymbol, selectedPeSymbol)
+                // Collect all timestamps from 09:25:00 to 09:32:00 across all candidate candles
+                val allCandleTimestamps = (ceCandlesMap.values.flatten().map { it.timestamp } + peCandlesMap.values.flatten().map { it.timestamp })
+                    .filter { it >= "$dayStr 09:25:00" && it <= "$dayStr 09:32:00" }
+                    .distinct()
+                    .sorted()
 
-                println("📌 Selected CE: $selectedCeSymbol (9:25 Price: ₹%.2f)".format(ce925Price))
-                println("📌 Selected PE: $selectedPeSymbol (9:25 Price: ₹%.2f)".format(pe925Price))
-
-                if (selectedCeSymbol == null || selectedPeSymbol == null) {
-                    println("❌ No valid options found trading below ₹180 at 9:25 AM for $dayStr.")
+                if (allCandleTimestamps.isEmpty()) {
+                    println("❌ No 5-second candle data available for $dayStr (Date is in the future or market data is missing). Skipping...")
                     currDate = currDate.plusDays(1)
                     continue
                 }
 
-                val ceCandles = ceCandlesMap[selectedCeSymbol] ?: emptyList()
-                val peCandles = peCandlesMap[selectedPeSymbol] ?: emptyList()
+                var selectedCeSymbol: String? = null
+                var selectedPeSymbol: String? = null
+                var ce925Price = 0.0
+                var pe925Price = 0.0
+                var watchlistTime: String? = null
 
-                val ceTickMap = ceCandles.associateBy { it.timestamp }
-                val peTickMap = peCandles.associateBy { it.timestamp }
-                val allTimestamps = (ceTickMap.keys + peTickMap.keys)
-                    .filter { it >= "$dayStr 09:25:00" && it <= "$dayStr 09:30:00" }
-                    .sorted()
+                val ceTickMaps = ceCandlesMap.mapValues { entry -> entry.value.associateBy { it.timestamp } }
+                val peTickMaps = peCandlesMap.mapValues { entry -> entry.value.associateBy { it.timestamp } }
 
-                println("\n--- [OBSERVATION WINDOW 9:25 AM TO 9:30 AM (5-Second Ticks)] ---")
+                val lastPrices = mutableMapOf<String, Double>()
+
+                println("\n--- [CONTINUOUS SEARCH & OBSERVATION WINDOW 9:25 AM TO 9:32 AM (5-Second Ticks)] ---")
                 var triggeredSymbol: String? = null
                 var triggeredType: String? = null
                 var entryTime: String? = null
                 var entryPrice = 0.0
 
-                var lastSeenCe = ce925Price
-                var lastSeenPe = pe925Price
-
-                for (ts in allTimestamps) {
-                    val ceCandle = ceTickMap[ts]
-                    val peCandle = peTickMap[ts]
-
-                    val currentCe = ceCandle?.close ?: lastSeenCe
-                    val currentPe = peCandle?.close ?: lastSeenPe
-
-                    println("⏱️ [$ts] CE ($selectedCeSymbol) Close: ₹%.2f | PE ($selectedPeSymbol) Close: ₹%.2f".format(currentCe, currentPe))
-
-                    if (lastSeenCe < 180.0 && currentCe >= 180.0) {
-                        triggeredSymbol = selectedCeSymbol
-                        triggeredType = "CE"
-                        entryTime = ts
-                        entryPrice = currentCe
-                        println("🚀 [ENTRY TRIGGERED] CE crossed upward through 180! Entry Price: ₹%.2f at $entryTime".format(entryPrice))
-                        break
+                for (ts in allCandleTimestamps) {
+                    // Update latest prices for all symbols at this timestamp
+                    for ((sym, map) in ceTickMaps) {
+                        map[ts]?.let { lastPrices[sym] = it.close }
                     }
-                    if (lastSeenPe < 180.0 && currentPe >= 180.0) {
-                        triggeredSymbol = selectedPeSymbol
-                        triggeredType = "PE"
-                        entryTime = ts
-                        entryPrice = currentPe
-                        println("🚀 [ENTRY TRIGGERED] PE crossed upward through 180! Entry Price: ₹%.2f at $entryTime".format(entryPrice))
-                        break
+                    for ((sym, map) in peTickMaps) {
+                        map[ts]?.let { lastPrices[sym] = it.close }
                     }
 
-                    lastSeenCe = currentCe
-                    lastSeenPe = currentPe
+                    // Continuous Search Phase: Find BOTH CE and PE in range ₹155–₹175 simultaneously
+                    if (selectedCeSymbol == null || selectedPeSymbol == null) {
+                        var bestCeScore = Double.MAX_VALUE
+                        var bestPeScore = Double.MAX_VALUE
+                        var foundCe: String? = null
+                        var foundPe: String? = null
+                        var foundCePrice = 0.0
+                        var foundPePrice = 0.0
+
+                        for ((sym, price) in lastPrices) {
+                            if (price in 155.0..177.0) {
+                                val diff = 175.0 - price
+                                val isCe = sym.endsWith("CE")
+                                if (isCe && diff < bestCeScore) {
+                                    bestCeScore = diff
+                                    foundCe = sym
+                                    foundCePrice = price
+                                } else if (!isCe && diff < bestPeScore) {
+                                    bestPeScore = diff
+                                    foundPe = sym
+                                    foundPePrice = price
+                                }
+                            }
+                        }
+
+                        if (foundCe != null && foundPe != null) {
+                            selectedCeSymbol = foundCe
+                            selectedPeSymbol = foundPe
+                            ce925Price = foundCePrice
+                            pe925Price = foundPePrice
+                            watchlistTime = ts
+                            println("🎯 [Watchlist Complete at $ts] CE: $foundCe @ ₹$ce925Price | PE: $foundPe @ ₹$pe925Price")
+                        } // else {
+                            // println("⏳ [$ts] Continuous Search: Scanning candidate options for ₹155–₹175 range (Found CE: ${foundCe ?: "None"}, PE: ${foundPe ?: "None"})...")
+                        // }
+                    }
+
+                    // Breakout Monitoring Phase (once watchlisted)
+                    val ceSym = selectedCeSymbol
+                    val peSym = selectedPeSymbol
+                    if (ceSym != null && peSym != null && ts > (watchlistTime ?: ts)) {
+                        val cePrice = lastPrices[ceSym] ?: 0.0
+                        val pePrice = lastPrices[peSym] ?: 0.0
+
+                        // println("⏱️ [$ts] Watchlist Tick | CE ($ceSym): ₹$cePrice | PE ($peSym): ₹$pePrice (Target > 180)")
+
+                        if (cePrice >= 180.0) {
+                            triggeredSymbol = ceSym
+                            triggeredType = "CE"
+                            entryTime = ts
+                            entryPrice = cePrice
+                            println("🚀 [ENTRY TRIGGERED] CE crossed upward through 180! Entry Price: ₹%.2f at $entryTime".format(entryPrice))
+                            break
+                        }
+                        if (pePrice >= 180.0) {
+                            triggeredSymbol = peSym
+                            triggeredType = "PE"
+                            entryTime = ts
+                            entryPrice = pePrice
+                            println("🚀 [ENTRY TRIGGERED] PE crossed upward through 180! Entry Price: ₹%.2f at $entryTime".format(entryPrice))
+                            break
+                        }
+                    }
                 }
 
                 if (triggeredSymbol == null || triggeredType == null || entryTime == null) {
-                    println("⏸️ [No Trade] Neither contract crossed upward through ₹180 between 9:25 and 9:30 AM.")
+                    println("⏸️ [No Trade] Neither contract crossed upward through ₹180 between 9:25 and 9:32 AM.")
                     currDate = currDate.plusDays(1)
                     continue
                 }
 
                 // 3. Simulate Trade with Post-1:2 Trailing Stop-Loss
-                val tradeCandles = if (triggeredType == "CE") ceCandles else peCandles
+                val tradeCandles = ceCandlesMap[triggeredSymbol] ?: peCandlesMap[triggeredSymbol] ?: emptyList()
                 val tradeResult = simulatePost1To2TrailingTrade(triggeredSymbol, triggeredType, entryTime, entryPrice, tradeCandles, dayStr, quantity)
                 results.add(tradeResult)
 
@@ -456,7 +477,7 @@ class HistoricalBacktestEngine(private val viewModel: AuthViewModel) {
                 }
             }
 
-            println("📊 [5S TICK] ${candle.timestamp} | High: ₹%.2f | Low: ₹%.2f | Close: ₹%.2f | Active SL: ₹%.2f | Trailing Active: $isTrailingActive".format(currentHigh, currentLow, currentClose, stopLoss))
+            // println("📊 [5S TICK] ${candle.timestamp} | High: ₹%.2f | Low: ₹%.2f | Close: ₹%.2f | Active SL: ₹%.2f | Trailing Active: $isTrailingActive".format(currentHigh, currentLow, currentClose, stopLoss))
 
             // Stop Loss Hit Check
             if (currentLow <= stopLoss) {
