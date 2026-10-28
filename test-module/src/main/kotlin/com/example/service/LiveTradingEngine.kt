@@ -222,8 +222,8 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
 
                             for ((sym, price) in symbolPricesAt925) {
                                 val info = symbolToStrikeMap[sym] ?: continue
-                                if (price in 155.0..175.0) {
-                                    val diff = 175.0 - price
+                                if (price in 155.0..177.0) {
+                                    val diff = 177.0 - price
                                     if (info.second == "CE" && diff < bestCeScore) {
                                         bestCeScore = diff
                                         foundCe = sym

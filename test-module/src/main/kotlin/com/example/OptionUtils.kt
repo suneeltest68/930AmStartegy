@@ -36,6 +36,8 @@ object OptionUtils {
     private val expiryCache = mutableMapOf<String, JSONObject>()
     private val contractsCache = mutableMapOf<String, JSONObject>()
     private val fnoHistoryCache = mutableMapOf<String, JSONObject>()
+    private val expiredExpiryCache = mutableMapOf<String, String>()
+    private val expiredContractsCache = mutableMapOf<String, List<String>>()
 
     /**
      * Identifies the At-The-Money (ATM) strike price given the current underlying spot price and strike interval.
@@ -263,51 +265,64 @@ object OptionUtils {
         val strikeInterval = if (indexSymbol.contains("SENSEX", ignoreCase = true)) 100 else 50
         val atmStrike = calculateAtmStrike(spotPrice, strikeInterval)
 
-        val rangeFrom = LocalDate.parse(tradeDate).minusMonths(1).toString()
-        val rangeTo = LocalDate.parse(tradeDate).plusDays(7).toString()
+        val expiryKey = "$indexSymbol-$tradeDate-$expiryIndex"
+        var targetExpiry = expiredExpiryCache[expiryKey]
+        if (targetExpiry == null) {
+            val rangeFrom = LocalDate.parse(tradeDate).minusMonths(1).toString()
+            val rangeTo = LocalDate.parse(tradeDate).plusDays(7).toString()
 
-        val expiryJson = viewModel.fetchHistoryExpiryDates(appId, token, indexSymbol, rangeFrom, rangeTo)
+            val expiryJson = viewModel.fetchHistoryExpiryDates(appId, token, indexSymbol, rangeFrom, rangeTo)
 
-        var targetExpiry = tradeDate
-        var optionsExpiriesArr: org.json.JSONArray? = null
-        if (expiryJson != null && expiryJson.has("data")) {
-            val dataObj = expiryJson.getJSONObject("data")
-            if (dataObj.has("expiry_dates")) {
-                optionsExpiriesArr = dataObj.getJSONObject("expiry_dates").optJSONArray("options")
+            var optionsExpiriesArr: org.json.JSONArray? = null
+            if (expiryJson != null && expiryJson.has("data")) {
+                val dataObj = expiryJson.getJSONObject("data")
+                if (dataObj.has("expiry_dates")) {
+                    optionsExpiriesArr = dataObj.getJSONObject("expiry_dates").optJSONArray("options")
+                }
             }
-        }
 
-        val allExpiries = mutableListOf<String>()
-        if (optionsExpiriesArr != null) {
-            for (i in 0 until optionsExpiriesArr.length()) {
-                allExpiries.add(optionsExpiriesArr.getString(i))
+            val allExpiries = mutableListOf<String>()
+            if (optionsExpiriesArr != null) {
+                for (i in 0 until optionsExpiriesArr.length()) {
+                    allExpiries.add(optionsExpiriesArr.getString(i))
+                }
             }
+
+            val validExpiries = allExpiries.filter { it >= tradeDate }.distinct().sorted()
+            targetExpiry = if (expiryIndex in validExpiries.indices) {
+                validExpiries[expiryIndex]
+            } else {
+                validExpiries.firstOrNull() ?: tradeDate
+            }
+            expiredExpiryCache[expiryKey] = targetExpiry
         }
 
-        val validExpiries = allExpiries.filter { it >= tradeDate }.distinct().sorted()
-        targetExpiry = if (expiryIndex in validExpiries.indices) {
-            validExpiries[expiryIndex]
-        } else {
-            validExpiries.firstOrNull() ?: tradeDate
-        }
-
-        val contractsJson = viewModel.fetchHistoryUnderlyingSymbols(appId, token, indexSymbol, targetExpiry)
-
-        var optionSymbol = ""
-        if (contractsJson != null && contractsJson.has("data")) {
-            val dataObj = contractsJson.getJSONObject("data")
-            if (dataObj.has("contracts")) {
-                val optionsArray = dataObj.getJSONObject("contracts").optJSONArray("options")
-                if (optionsArray != null) {
-                    val strikeStr = atmStrike.toString()
-                    for (i in 0 until optionsArray.length()) {
-                        val sym = optionsArray.getString(i)
-                        if (sym.contains(strikeStr) && sym.endsWith(optionType)) {
-                            optionSymbol = sym
-                            break
+        val contractsKey = "$indexSymbol-$targetExpiry"
+        var contractSymbols = expiredContractsCache[contractsKey]
+        if (contractSymbols == null) {
+            val list = mutableListOf<String>()
+            val contractsJson = viewModel.fetchHistoryUnderlyingSymbols(appId, token, indexSymbol, targetExpiry)
+            if (contractsJson != null && contractsJson.has("data")) {
+                val dataObj = contractsJson.getJSONObject("data")
+                if (dataObj.has("contracts")) {
+                    val optionsArray = dataObj.getJSONObject("contracts").optJSONArray("options")
+                    if (optionsArray != null) {
+                        for (i in 0 until optionsArray.length()) {
+                            list.add(optionsArray.getString(i))
                         }
                     }
                 }
+            }
+            contractSymbols = list
+            expiredContractsCache[contractsKey] = contractSymbols
+        }
+
+        var optionSymbol = ""
+        val strikeStr = atmStrike.toString()
+        for (sym in contractSymbols) {
+            if (sym.contains(strikeStr) && sym.endsWith(optionType)) {
+                optionSymbol = sym
+                break
             }
         }
 

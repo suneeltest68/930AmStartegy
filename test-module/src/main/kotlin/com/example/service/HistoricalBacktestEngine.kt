@@ -192,6 +192,12 @@ class HistoricalBacktestEngine(private val viewModel: AuthViewModel) {
                     }
                 }
 
+                if (ceCandlesMap.isEmpty() && peCandlesMap.isEmpty()) {
+                    println("🏖️ [Holiday / Market Closed] No option contract candles found for $dayStr. Skipping...")
+                    currDate = currDate.plusDays(1)
+                    continue
+                }
+
                 // Collect all timestamps from 09:25:00 to 09:32:00 across all candidate candles
                 val allCandleTimestamps = (ceCandlesMap.values.flatten().map { it.timestamp } + peCandlesMap.values.flatten().map { it.timestamp })
                     .filter { it >= "$dayStr 09:25:00" && it <= "$dayStr 09:32:00" }

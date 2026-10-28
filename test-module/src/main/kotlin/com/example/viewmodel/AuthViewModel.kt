@@ -13,36 +13,56 @@ import java.io.File
 
 object DiskCache {
     private val cacheDir = File(".cache_historical_data").apply { if (!exists()) mkdirs() }
+    private val cacheFile = File(cacheDir, "backtest_cache.json")
+    private val memCache = mutableMapOf<String, JSONObject>()
 
-    fun get(key: String): JSONObject? {
+    init {
+        loadCache()
+    }
+
+    @Synchronized
+    private fun loadCache() {
         try {
-            val safeKey = key.replace(":", "_").replace("-", "_").replace("/", "_")
-            val file = File(cacheDir, "$safeKey.json")
-            if (file.exists() && file.length() > 0) {
-                val json = JSONObject(file.readText())
-                if (json.has("candles") && json.getJSONArray("candles").length() > 0) {
-                    return json
-                }
-                if (json.has("data")) {
-                    val dataObj = json.optJSONObject("data")
-                    if (dataObj != null && dataObj.length() > 0) {
-                        return json
+            if (cacheFile.exists() && cacheFile.length() > 0) {
+                val rootJson = JSONObject(cacheFile.readText())
+                for (key in rootJson.keys()) {
+                    val payload = rootJson.optJSONObject(key)
+                    if (payload != null) {
+                        memCache[key] = payload
                     }
                 }
             }
         } catch (_: Exception) {}
+    }
+
+    @Synchronized
+    fun get(key: String): JSONObject? {
+        try {
+            memCache[key]?.let { return it }
+        } catch (_: Exception) {}
         return null
     }
 
+    @Synchronized
     fun put(key: String, json: JSONObject) {
         try {
             val hasValidCandles = json.has("candles") && json.getJSONArray("candles").length() > 0
             val hasValidData = json.has("data") && json.optJSONObject("data") != null && json.optJSONObject("data")!!.length() > 0
             if (hasValidCandles || hasValidData) {
-                val safeKey = key.replace(":", "_").replace("-", "_").replace("/", "_")
-                val file = File(cacheDir, "$safeKey.json")
-                file.writeText(json.toString())
+                memCache[key] = json
+                flushToFile()
             }
+        } catch (_: Exception) {}
+    }
+
+    @Synchronized
+    private fun flushToFile() {
+        try {
+            val rootJson = JSONObject()
+            for ((k, v) in memCache) {
+                rootJson.put(k, v)
+            }
+            cacheFile.writeText(rootJson.toString())
         } catch (_: Exception) {}
     }
 }
