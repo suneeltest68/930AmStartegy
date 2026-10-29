@@ -205,12 +205,17 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                             lastPrices[symbol] = ltp
                         }
 
-                        // Continuous Search until 9:32 AM: Only wishlist when BOTH CE and PE are in range ₹155-175
+                        // =========================================================================
+                        // STEP 4: Continuous Dual-Leg Search & Watchlist (9:25 AM – 9:32 AM)
+                        // Connects to Fyers WebSocket in LITE mode (ChannelModes.LITE).
+                        // Continuously scans incoming real-time ticks until BOTH a Call (CE) 
+                        // and Put (PE) strike enter the ₹155 – ₹177 premium range simultaneously.
+                        // =========================================================================
                         if (selectedCeSymbol == null || selectedPeSymbol == null) {
                             val currentTime = System.currentTimeMillis()
                             if (currentTime - lastSearchLogTime > 10000L) {
                                 lastSearchLogTime = currentTime
-                                println("⏳ [Continuous Search] Still scanning for valid CE & PE in range ₹155–₹175 (Collected ticks for ${symbolPricesAt925.size}/${allCandidateSymbols.size} candidate symbols)...")
+                                println("⏳ [Continuous Search] Still scanning for valid CE & PE in range ₹155–₹177 (Collected ticks for ${symbolPricesAt925.size}/${allCandidateSymbols.size} candidate symbols)...")
                             }
 
                             var bestCeScore = Double.MAX_VALUE
@@ -224,11 +229,12 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                                 val info = symbolToStrikeMap[sym] ?: continue
                                 if (price in 155.0..177.0) {
                                     val diff = 177.0 - price
-                                    if (info.second == "CE" && diff < bestCeScore) {
+                                    val isCe = info.second == "CE" || sym.endsWith("CE")
+                                    if (isCe && diff < bestCeScore) {
                                         bestCeScore = diff
                                         foundCe = sym
                                         cePrice = price
-                                    } else if (info.second == "PE" && diff < bestPeScore) {
+                                    } else if (!isCe && diff < bestPeScore) {
                                         bestPeScore = diff
                                         foundPe = sym
                                         pePrice = price
@@ -236,20 +242,21 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
                                 }
                             }
 
+                            // Only wishlist when BOTH CE and PE are in range simultaneously
                             if (foundCe != null && foundPe != null) {
                                 selectedCeSymbol = foundCe
                                 selectedPeSymbol = foundPe
 
                                 println("🎯 [Watchlist Complete] Selected Live CE: $foundCe @ ₹$cePrice | Selected Live PE: $foundPe @ ₹$pePrice")
                                 scope.launch {
-                                    TelegramNotifier.sendAlert("🎯 [9:25 AM Trade Started - SDK WebSocket] Watchlisted Strikes (Range ₹155-175):\n🟢 CE: $foundCe @ ₹%.2f\n🔴 PE: $foundPe @ ₹%.2f".format(cePrice, pePrice))
+                                    TelegramNotifier.sendAlert("🎯 [9:25 AM Trade Started - SDK WebSocket] Watchlisted Strikes (Range ₹155-177):\n🟢 CE: $foundCe @ ₹%.2f\n🔴 PE: $foundPe @ ₹%.2f".format(cePrice, pePrice))
                                 }
 
-                                // Focus subscription strictly on selected CE and PE
+                                // Focus WebSocket subscription strictly on selected CE and PE (unsubscribe from others)
                                 try { fyersSocket.UnSubscribeData(allCandidateSymbols) } catch (_: Exception) {}
                                 try { fyersSocket.SubscribeData(listOf(foundCe, foundPe)) } catch (_: Exception) {}
 
-                                // Start 10-second background status ticker
+                                // Start 10-second background status ticker once watchlisted
                                 scope.launch {
                                     while (LocalTime.now().isBefore(LocalTime.of(9, 32, 0)) && sessionActive) {
                                         delay(10000L)

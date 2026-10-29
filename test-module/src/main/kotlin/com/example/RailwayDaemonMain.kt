@@ -154,8 +154,12 @@ fun main() = runBlocking {
         println("🌅 [Daily Routine] Starting Trading Session...")
         println("--------------------------------------------------")
 
-        // Clear cached token at the start of every daily trading session
+        // Clear cached token and cache files at the start of every daily trading session to force fresh login
         viewModel.clearToken()
+        try {
+            File("token.json").delete()
+            File(".cache_historical_data/backtest_cache.json").delete()
+        } catch (_: Exception) {}
 
         val cachedToken = viewModel.getCachedToken()
         var activeToken: String? = null
@@ -207,24 +211,23 @@ fun main() = runBlocking {
             TelegramNotifier.sendAlert("✅ [Fyers 9:00 AM Auth] Daily authentication successful! Access Token is active and ready for the 9:25 AM trading session.")
             try {
                 strategyEngine.executeLiveStrategy(appId, activeToken)
-
-                // Keep daemon alive during market hours until 3:25 PM IST today
-                val now = ZonedDateTime.now(istZone)
-                val marketCloseTimeToday = now.withHour(15).withMinute(25).withSecond(0).withNano(0)
-                if (now.isBefore(marketCloseTimeToday)) {
-                    val waitDuration = Duration.between(now, marketCloseTimeToday).toMillis()
-                    println("[Daemon] Trading session active. Waiting until market close at 3:25 PM IST (${waitDuration / 1000 / 60} minutes remaining)...")
-                    delay(waitDuration)
-                }
+                println("[Daemon] Trade session completed. Stopping bot and entering immediate EOD hard sleep...")
             } catch (e: Exception) {
                 println("[Daemon Error] Workflow exception: ${e.message}")
                 TelegramNotifier.sendAlert("❌ [Fyers Daemon] Error during execution: ${e.message}")
             }
         }
 
-        println("[Daemon] 💤 Trading session completed & all connections closed. Hard sleeping until 9:00 AM IST tomorrow...")
+        // Cleanly delete all caches, tokens, and close all connections. Zero API calls.
+        viewModel.clearToken()
         try {
-            TelegramNotifier.sendAlert("💤 [Fyers Daemon] Trading session completed & all connections closed. Bot entering hard sleep until 9:00 AM IST tomorrow.")
+            File("token.json").delete()
+            File(".cache_historical_data/backtest_cache.json").delete()
+        } catch (_: Exception) {}
+
+        println("[Daemon] 💤 Trade completed & all connections closed. Hard sleeping until 9:00 AM IST tomorrow...")
+        try {
+            TelegramNotifier.sendAlert("💤 [Fyers Daemon] Trade session completed & all caches/connections deleted. Bot entering hard sleep until 9:00 AM IST tomorrow.")
         } catch (_: Exception) {}
 
         // Sleep 10 minutes before looping to ensure we don't double-trigger on the same day
