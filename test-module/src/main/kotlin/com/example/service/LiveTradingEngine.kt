@@ -359,7 +359,7 @@ class LiveTradingEngine(private val viewModel: AuthViewModel) {
         if (signal == null) {
             println("⏸️ [No Trade] Neither CE nor PE crossed upward through ₹180 between 9:25 and 9:32 AM.")
             scope.launch {
-                TelegramNotifier.sendAlert("⏸️ [9:32 AM No Entry] Neither CE nor PE crossed upward through ₹180 between 9:25 and 9:32 AM (Strikes scanned between ₹155 and ₹175). No trade today.")
+                TelegramNotifier.sendAlert("⏸️ [9:32 AM No Entry] Neither CE nor PE crossed upward through ₹180 between 9:25 and 9:32 AM (Strikes scanned between ₹155 and ₹177). No trade today.")
             }
             return
         }
